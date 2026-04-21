@@ -74,6 +74,14 @@ class SampleQueueTest {
     }
 
     @Test
+    void enqueue_null_sample_throws_storage_exception() {
+        SampleQueue q = new SampleQueue(3);
+        assertThatThrownBy(() -> q.enqueue(null))
+                .isInstanceOf(StorageException.class)
+                .hasMessageContaining("null");
+    }
+
+    @Test
     void drain_empties_the_queue_up_to_max() throws Exception {
         SampleQueue q = new SampleQueue(10);
         for (int i = 0; i < 5; i++) q.enqueue(sample(i));

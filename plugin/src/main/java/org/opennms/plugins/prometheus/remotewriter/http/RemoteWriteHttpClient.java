@@ -98,16 +98,23 @@ public final class RemoteWriteHttpClient {
         Request request = buildRequest(snappyCompressedPayload);
         int maxAttempts = Math.max(1, config.getRetryMaxAttempts());
         long backoff = Math.max(1, config.getRetryInitialBackoffMs());
+        // validate() guarantees retry.max-backoff-ms >= retry.initial-backoff-ms.
         long maxBackoff = Math.max(backoff, config.getRetryMaxBackoffMs());
 
-        IOException lastIoEx = null;
-        int lastStatus = 0;
+        // Track the *last attempt's* failure kind so the final classification
+        // reflects what actually happened on the last try, not a stale earlier
+        // error. Without this, a run like "5xx, 5xx, IOException" would report
+        // DROPPED_5XX_EXHAUSTED with a stale body (the real last failure was
+        // the transport error).
+        enum LastKind { NONE, HTTP_5XX, TRANSPORT }
+        LastKind lastKind = LastKind.NONE;
         String lastBody = "";
+        int lastStatus = 0;
+        String lastIoMessage = null;
 
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             try (Response resp = http.newCall(request).execute()) {
                 int code = resp.code();
-                lastStatus = code;
                 if (resp.isSuccessful()) {
                     writesSuccessful.incrementAndGet();
                     bytesWritten.addAndGet(snappyCompressedPayload.length);
@@ -119,12 +126,15 @@ public final class RemoteWriteHttpClient {
                     writes4xx.incrementAndGet();
                     return new WriteResult(WriteOutcome.DROPPED_4XX, code, attempt, body);
                 }
-                // 5xx: retry
+                // 5xx (or anything outside 2xx/4xx): retry
+                lastKind = LastKind.HTTP_5XX;
+                lastStatus = code;
                 lastBody = readBodyQuiet(resp);
                 LOG.warn("Prometheus remote-write returned {} on attempt {}/{}: {}",
                          code, attempt, maxAttempts, lastBody);
             } catch (IOException io) {
-                lastIoEx = io;
+                lastKind = LastKind.TRANSPORT;
+                lastIoMessage = io.getMessage();
                 LOG.warn("Prometheus remote-write transport failure on attempt {}/{}: {}",
                          attempt, maxAttempts, io.getMessage());
             }
@@ -138,17 +148,34 @@ public final class RemoteWriteHttpClient {
             }
         }
 
-        if (lastIoEx != null && lastStatus == 0) {
+        if (lastKind == LastKind.TRANSPORT) {
             writesTransportError.incrementAndGet();
-            return new WriteResult(WriteOutcome.TRANSPORT_ERROR, 0, maxAttempts, lastIoEx.getMessage());
+            return new WriteResult(WriteOutcome.TRANSPORT_ERROR, 0, maxAttempts, lastIoMessage);
         }
         writes5xxExhausted.incrementAndGet();
         return new WriteResult(WriteOutcome.DROPPED_5XX_EXHAUSTED, lastStatus, maxAttempts, lastBody);
     }
 
     public void shutdown() {
-        http.dispatcher().executorService().shutdown();
+        java.util.concurrent.ExecutorService exec = http.dispatcher().executorService();
+        exec.shutdown();
+        try {
+            // Give in-flight requests a bounded window to finish before
+            // tearing down the connection pool. Without the wait, a
+            // retry-backoff Thread.sleep in progress can survive past
+            // bundle-stop and hold a reference to the OSGi classloader.
+            if (!exec.awaitTermination(5, TimeUnit.SECONDS)) {
+                exec.shutdownNow();
+                exec.awaitTermination(1, TimeUnit.SECONDS);
+            }
+        } catch (InterruptedException e) {
+            exec.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
         http.connectionPool().evictAll();
+        if (config.isTlsInsecureSkipVerify()) {
+            TlsConfig.stopInsecureWarn();
+        }
     }
 
     // -- counter getters (wired to Dropwizard in task 11.1) -----------------

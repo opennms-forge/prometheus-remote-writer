@@ -121,6 +121,18 @@ write.url = https://mimir.example.com/api/v1/push
 read.url  = https://mimir.example.com/prometheus
 ```
 
+`read.url` is the backend's **Prometheus-compatible root**. The plugin
+appends `/api/v1/series` and `/api/v1/query_range` itself. Do NOT include
+`/api/v1` in the configured URL. Common shapes:
+
+| Backend | `read.url` |
+|---|---|
+| Prometheus | `https://prom:9090` |
+| Grafana Mimir | `https://mimir/prometheus` |
+| VictoriaMetrics | `https://vm:8428` |
+| Cortex | `https://cortex/prometheus` |
+| Thanos Receive (Query) | `https://thanos-query` |
+
 Then in `etc/opennms.properties.d/timeseries.properties`:
 
 ```properties
@@ -230,8 +242,10 @@ Exposed via a Dropwizard registry and printed by the Karaf shell command
 - `samples_written_total`
 - `samples_dropped_4xx_total`
 - `samples_dropped_5xx_total`
+- `samples_dropped_transport_total` — IOException / socket failures (distinct from 5xx so you can alert separately)
 - `samples_dropped_queue_full_total`
 - `samples_dropped_nonfinite_total`
+- `samples_dropped_duplicate_total` — same-timestamp same-series dedup (last-write-wins)
 - `delete_noop_total`
 - `metadata_denylist_blocked_total`
 - `queue_depth` (gauge)

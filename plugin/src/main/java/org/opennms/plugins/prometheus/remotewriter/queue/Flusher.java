@@ -112,12 +112,27 @@ public final class Flusher {
                 LOG.error("flusher caught unexpected exception", unexpected);
             }
         }
-        // Drain any residual samples so stop() with a non-zero grace can
-        // still get them out. The caller's grace window bounds this.
-        List<MappedSample> tail = queue.drain(batchSize);
-        if (!tail.isEmpty()) {
-            LOG.info("flushing {} residual sample(s) during shutdown", tail.size());
-            flushBatch(tail);
+
+        // Drain all residual samples so stop() with a non-zero grace can get
+        // them out — loop, not a single drain(batchSize), because the queue
+        // may hold more than batchSize samples.
+        //
+        // Clear the interrupt flag first: a stop-path interrupt would
+        // otherwise short-circuit Thread.sleep() inside the HTTP retry
+        // backoff and abort the residual flushes. Shutdown is cooperative;
+        // the caller's grace window bounds total time.
+        boolean wasInterrupted = Thread.interrupted();
+        try {
+            while (true) {
+                List<MappedSample> tail = queue.drain(batchSize);
+                if (tail.isEmpty()) break;
+                LOG.info("flushing {} residual sample(s) during shutdown", tail.size());
+                flushBatch(tail);
+            }
+        } finally {
+            if (wasInterrupted) {
+                Thread.currentThread().interrupt();
+            }
         }
         LOG.info("flusher stopped");
     }
@@ -148,7 +163,7 @@ public final class Flusher {
                         built.samplesWritten(), result.attemptsMade(), result.httpStatus());
             }
             case TRANSPORT_ERROR -> {
-                metrics.samplesDropped5xx(built.samplesWritten());
+                metrics.samplesDroppedTransport(built.samplesWritten());
                 LOG.warn("dropped batch of {} samples after transport errors: {}",
                         built.samplesWritten(), result.detail());
             }

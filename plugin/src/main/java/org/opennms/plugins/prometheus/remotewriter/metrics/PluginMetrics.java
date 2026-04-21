@@ -28,6 +28,7 @@ public final class PluginMetrics {
     public static final String SAMPLES_WRITTEN            = "samples_written_total";
     public static final String SAMPLES_DROPPED_4XX        = "samples_dropped_4xx_total";
     public static final String SAMPLES_DROPPED_5XX        = "samples_dropped_5xx_total";
+    public static final String SAMPLES_DROPPED_TRANSPORT  = "samples_dropped_transport_total";
     public static final String SAMPLES_DROPPED_QUEUE_FULL = "samples_dropped_queue_full_total";
     public static final String SAMPLES_DROPPED_NONFINITE  = "samples_dropped_nonfinite_total";
     public static final String SAMPLES_DROPPED_DUPLICATE  = "samples_dropped_duplicate_total";
@@ -42,6 +43,7 @@ public final class PluginMetrics {
     private final Counter samplesWritten;
     private final Counter samplesDropped4xx;
     private final Counter samplesDropped5xx;
+    private final Counter samplesDroppedTransport;
     private final Counter samplesDroppedNonfinite;
     private final Counter samplesDroppedDuplicate;
 
@@ -49,6 +51,7 @@ public final class PluginMetrics {
         this.samplesWritten          = registry.counter(SAMPLES_WRITTEN);
         this.samplesDropped4xx       = registry.counter(SAMPLES_DROPPED_4XX);
         this.samplesDropped5xx       = registry.counter(SAMPLES_DROPPED_5XX);
+        this.samplesDroppedTransport = registry.counter(SAMPLES_DROPPED_TRANSPORT);
         this.samplesDroppedNonfinite = registry.counter(SAMPLES_DROPPED_NONFINITE);
         this.samplesDroppedDuplicate = registry.counter(SAMPLES_DROPPED_DUPLICATE);
     }
@@ -60,6 +63,7 @@ public final class PluginMetrics {
     public void samplesWritten(long n)          { if (n > 0) samplesWritten.inc(n); }
     public void samplesDropped4xx(long n)       { if (n > 0) samplesDropped4xx.inc(n); }
     public void samplesDropped5xx(long n)       { if (n > 0) samplesDropped5xx.inc(n); }
+    public void samplesDroppedTransport(long n) { if (n > 0) samplesDroppedTransport.inc(n); }
     public void samplesDroppedNonfinite(long n) { if (n > 0) samplesDroppedNonfinite.inc(n); }
     public void samplesDroppedDuplicate(long n) { if (n > 0) samplesDroppedDuplicate.inc(n); }
 

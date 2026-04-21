@@ -48,11 +48,18 @@ public final class SampleQueue {
      * caller (OpenNMS {@code store()}) sees the failure and can react.
      */
     public void enqueue(MappedSample sample) throws StorageException {
+        if (sample == null) {
+            // ArrayBlockingQueue.offer(null) NPEs; fail the same way every
+            // other boundary fails — with a StorageException the caller can
+            // react to.
+            throw new StorageException("sample must not be null");
+        }
         if (!queue.offer(sample)) {
             samplesDroppedQueueFull.incrementAndGet();
             throw new StorageException(
-                "prometheus-remote-writer queue full (capacity=" + queue.remainingCapacity()
-                    + " + " + queue.size() + "); dropping sample");
+                "prometheus-remote-writer queue full (depth=" + queue.size()
+                    + ", capacity=" + (queue.size() + queue.remainingCapacity())
+                    + "); dropping sample");
         }
         samplesEnqueued.incrementAndGet();
     }
