@@ -105,11 +105,11 @@
             <artifactId>junit-jupiter</artifactId>
             <scope>test</scope>
         </dependency>
-        <!-- Integration-test support for the TSS compliance suite (JUnit 4 based). -->
+        <!-- Integration-test support for the TSS compliance suite (JUnit 4 based).
+             Version managed in the parent pom. -->
         <dependency>
             <groupId>org.opennms.integration.api</groupId>
             <artifactId>tss-tests</artifactId>
-            <version>${opennms-integration-api.version}</version>
             <scope>test</scope>
         </dependency>
         <dependency>

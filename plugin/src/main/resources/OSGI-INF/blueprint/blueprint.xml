@@ -41,6 +41,8 @@
             <cm:property name="http.max-connections"      value="16"/>
             <!-- Shutdown -->
             <cm:property name="shutdown.grace-period-ms"  value="10000"/>
+            <!-- Read path -->
+            <cm:property name="max-series-lookback-seconds" value="7776000"/>
             <!-- Label policy -->
             <cm:property name="labels.include" value=""/>
             <cm:property name="labels.exclude" value=""/>
@@ -79,7 +81,8 @@
         <property name="httpReadTimeoutMs"       value="${http.read-timeout-ms}"/>
         <property name="httpWriteTimeoutMs"      value="${http.write-timeout-ms}"/>
         <property name="httpMaxConnections"      value="${http.max-connections}"/>
-        <property name="shutdownGracePeriodMs"   value="${shutdown.grace-period-ms}"/>
+        <property name="shutdownGracePeriodMs"    value="${shutdown.grace-period-ms}"/>
+        <property name="maxSeriesLookbackSeconds" value="${max-series-lookback-seconds}"/>
         <property name="labelsInclude"           value="${labels.include}"/>
         <property name="labelsExclude"           value="${labels.exclude}"/>
         <property name="labelsRename"            value="${labels.rename}"/>

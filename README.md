@@ -249,6 +249,7 @@ Exposed via a Dropwizard registry and printed by the Karaf shell command
 - `delete_noop_total`
 - `metadata_denylist_blocked_total`
 - `queue_depth` (gauge)
+- `http_in_flight` (gauge) — running + queued HTTP requests at the dispatcher
 - `http_bytes_written_total`
 - `http_writes_successful_total`
 - `http_writes_failed_total`
