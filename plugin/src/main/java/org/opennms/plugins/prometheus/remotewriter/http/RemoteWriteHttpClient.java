@@ -186,6 +186,11 @@ public final class RemoteWriteHttpClient {
     public long getWritesTransportError() { return writesTransportError.get(); }
     public long getBytesWritten()         { return bytesWritten.get(); }
 
+    /** In-flight HTTP request count — running plus queued at the dispatcher. */
+    public int getInFlightCalls() {
+        return http.dispatcher().runningCallsCount() + http.dispatcher().queuedCallsCount();
+    }
+
     // -- internals ----------------------------------------------------------
 
     private Request buildRequest(byte[] body) {

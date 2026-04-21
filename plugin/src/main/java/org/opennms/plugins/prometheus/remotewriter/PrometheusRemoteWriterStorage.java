@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -40,50 +41,58 @@ import org.slf4j.LoggerFactory;
 /**
  * Top-level TimeSeriesStorage bean — composes the full pipeline.
  *
- * <p>On {@link #start()} the bean validates config, builds a fresh set of
- * collaborators (LabelMapper, SampleQueue, RemoteWriteHttpClient,
- * PrometheusReadClient, Flusher) and registers Dropwizard gauges pointing
- * at the authoritative state on each.
- *
- * <p>{@link #store(List)} maps each OpenNMS {@link Sample} through the
- * {@link LabelMapper} and enqueues the result. A queue-full condition
- * throws {@link StorageException} — OpenNMS sees the backpressure signal.
- *
- * <p>On {@link #stop()} the bean stops accepting new enqueues, gives the
- * Flusher up to {@code shutdown.grace-period-ms} to drain, and then
- * shuts the HTTP clients down. Any samples still in the queue after the
- * grace window are logged at WARN.
+ * <p>The active pipeline lives in an immutable {@link Active} record published
+ * via a single {@code volatile} reference. {@link #start()} atomically
+ * publishes a new Active after constructing every collaborator; {@link #stop()}
+ * atomically clears the reference before tearing the collaborators down.
+ * SPI methods snapshot the reference once at entry and operate on that local
+ * snapshot — this eliminates the torn-read race between a reader (e.g.
+ * {@code store()}) and {@code stop()}.
  */
 public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
 
     private static final Logger LOG = LoggerFactory.getLogger(PrometheusRemoteWriterStorage.class);
-    private static final long DELETE_WARN_INTERVAL_MS = 60_000L;
+    private static final long DELETE_WARN_INTERVAL_NANOS = TimeUnit.MINUTES.toNanos(1);
 
+    /** Previous active config, used only for hot-reload diff logging. */
     private static final AtomicReference<PrometheusRemoteWriterConfig> LAST_ACTIVE =
             new AtomicReference<>();
 
-    private final PrometheusRemoteWriterConfig config;
+    /**
+     * Everything constructed at {@link #start()} time. Published as a unit via
+     * the {@link #active} volatile so SPI callers can snapshot the whole
+     * pipeline without worrying about partial views.
+     */
+    private record Active(
+            LabelMapper           labelMapper,
+            SampleQueue           queue,
+            RemoteWriteHttpClient writeClient,
+            PrometheusReadClient  readClient,
+            Flusher               flusher,
+            PluginMetrics         metrics) {}
 
-    // Populated on start()
-    private volatile LabelMapper           labelMapper;
-    private volatile SampleQueue           queue;
-    private volatile RemoteWriteHttpClient writeClient;
-    private volatile PrometheusReadClient  readClient;
-    private volatile Flusher               flusher;
-    private volatile PluginMetrics         metrics;
-    private volatile boolean               acceptingWrites;
+    private final PrometheusRemoteWriterConfig config;
+    private volatile Active active;
 
     private final AtomicLong deleteNoopTotal        = new AtomicLong();
-    private final AtomicLong deleteWarnLastMs       = new AtomicLong();
+    // nanoTime-based so NTP backsteps or container resume can't freeze the
+    // throttle in the "just logged" state forever.
+    private final AtomicLong deleteWarnLastNanos    = new AtomicLong(Long.MIN_VALUE);
     private final AtomicLong deleteWarnSinceLastLog = new AtomicLong();
 
     public PrometheusRemoteWriterStorage(PrometheusRemoteWriterConfig config) {
         this.config = Objects.requireNonNull(config, "config");
     }
 
-    // --- Blueprint lifecycle ------------------------------------------------
+    // --- Blueprint lifecycle -----------------------------------------------
 
-    public void start() {
+    /** Idempotent: if already active, does nothing. On construction failure,
+     *  rolls back any collaborators that were already built. */
+    public synchronized void start() {
+        if (active != null) {
+            LOG.debug("start() called while already active; ignoring");
+            return;
+        }
         try {
             config.validate();
         } catch (IllegalStateException bad) {
@@ -91,62 +100,87 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
             throw bad;
         }
 
-        logActivationOrDiff();
+        PluginMetrics         m  = null;
+        LabelMapper           lm = null;
+        SampleQueue           q  = null;
+        RemoteWriteHttpClient wc = null;
+        PrometheusReadClient  rc = null;
+        Flusher               f  = null;
+        try {
+            m  = new PluginMetrics();
+            lm = new LabelMapper(config);
+            q  = new SampleQueue(config.getQueueCapacity());
+            wc = new RemoteWriteHttpClient(config);
+            rc = new PrometheusReadClient(config);
+            f  = new Flusher(q, wc, config.getBatchSize(), config.getFlushIntervalMs(), m);
 
-        this.metrics     = new PluginMetrics();
-        this.labelMapper = new LabelMapper(config);
-        this.queue       = new SampleQueue(config.getQueueCapacity());
-        this.writeClient = new RemoteWriteHttpClient(config);
-        this.readClient  = new PrometheusReadClient(config);
-        this.flusher     = new Flusher(queue, writeClient,
-                                       config.getBatchSize(),
-                                       config.getFlushIntervalMs(),
-                                       metrics);
-        registerGauges();
-        this.flusher.start();
-        this.acceptingWrites = true;
+            Active built = new Active(lm, q, wc, rc, f, m);
+            registerGauges(built);
+            logActivationOrDiff();
+            f.start();
+            // Publish last — readers that see a non-null active are guaranteed
+            // to see every collaborator fully constructed.
+            active = built;
+        } catch (RuntimeException e) {
+            // Roll back in reverse construction order. Swallow secondary
+            // failures so the original exception surfaces.
+            rollbackStart(f, wc, rc);
+            throw e;
+        }
     }
 
-    public void stop() {
+    public synchronized void stop() {
+        Active a = active;
+        if (a == null) {
+            LOG.debug("stop() called while not active; ignoring");
+            return;
+        }
+        // Clear first so concurrent SPI callers see the state change
+        // immediately and fail cleanly with StorageException instead of
+        // touching collaborators being torn down.
+        active = null;
+
         LOG.info("prometheus-remote-writer stopping");
-        this.acceptingWrites = false;
-        if (flusher != null) {
-            flusher.stop(config.getShutdownGracePeriodMs());
-            int residual = queue != null ? queue.depth() : 0;
+        try {
+            a.flusher().stop(config.getShutdownGracePeriodMs());
+            int residual = a.queue().depth();
             if (residual > 0) {
                 LOG.warn("shutdown completed with {} sample(s) still queued; dropping", residual);
             }
-            flusher = null;
+        } catch (RuntimeException e) {
+            LOG.warn("error stopping flusher: {}", e.getMessage(), e);
         }
-        if (writeClient != null) { writeClient.shutdown(); writeClient = null; }
-        if (readClient  != null) { readClient.shutdown();  readClient  = null; }
-        labelMapper = null;
-        queue       = null;
-        metrics     = null;
+        try { a.writeClient().shutdown(); } catch (RuntimeException e) { LOG.warn("write client shutdown: {}", e.getMessage(), e); }
+        try { a.readClient().shutdown();  } catch (RuntimeException e) { LOG.warn("read client shutdown: {}",  e.getMessage(), e); }
+
+        // Clear the static hot-reload diff anchor so a fresh start() after
+        // stop() logs "activated" rather than a spurious "reloaded".
+        LAST_ACTIVE.set(null);
     }
 
     // --- TimeSeriesStorage -------------------------------------------------
 
     @Override
     public void store(List<Sample> samples) throws StorageException {
-        if (!acceptingWrites) {
+        Active a = active;
+        if (a == null) {
             throw new StorageException("prometheus-remote-writer is not accepting writes "
                     + "(plugin is stopped or not yet started)");
         }
         if (samples == null || samples.isEmpty()) return;
 
         for (Sample s : samples) {
-            MappedSample mapped = labelMapper.map(s);
-            if (mapped == null) continue; // e.g. sample with no name
-            queue.enqueue(mapped);
+            MappedSample mapped = a.labelMapper().map(s);
+            if (mapped == null) continue;
+            a.queue().enqueue(mapped);
         }
     }
 
     @Override
     public List<Metric> findMetrics(Collection<TagMatcher> tagMatchers) throws StorageException {
-        PrometheusReadClient rc = readClient;
-        if (rc == null) throw new StorageException("findMetrics called before start()");
-        return rc.findMetrics(tagMatchers);
+        Active a = active;
+        if (a == null) throw new StorageException("findMetrics called before start()");
+        return a.readClient().findMetrics(tagMatchers);
     }
 
     @Override
@@ -167,9 +201,9 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
 
     @Override
     public TimeSeriesData getTimeSeriesData(TimeSeriesFetchRequest request) throws StorageException {
-        PrometheusReadClient rc = readClient;
-        if (rc == null) throw new StorageException("getTimeSeriesData called before start()");
-        return rc.getTimeSeriesData(request);
+        Active a = active;
+        if (a == null) throw new StorageException("getTimeSeriesData called before start()");
+        return a.readClient().getTimeSeriesData(request);
     }
 
     @Override
@@ -182,24 +216,30 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         deleteNoopTotal.incrementAndGet();
         deleteWarnSinceLastLog.incrementAndGet();
 
-        long now = System.currentTimeMillis();
-        long prev = deleteWarnLastMs.get();
-        if (now - prev >= DELETE_WARN_INTERVAL_MS
-                && deleteWarnLastMs.compareAndSet(prev, now)) {
+        long now = System.nanoTime();
+        long prev = deleteWarnLastNanos.get();
+        // First call: prev == Long.MIN_VALUE; subtraction would overflow, so
+        // special-case to "log the first one".
+        boolean due = prev == Long.MIN_VALUE || (now - prev) >= DELETE_WARN_INTERVAL_NANOS;
+        if (due && deleteWarnLastNanos.compareAndSet(prev, now)) {
             long count = deleteWarnSinceLastLog.getAndSet(0);
             LOG.warn("delete(Metric) called {} time(s) in the last {}s — the plugin "
                    + "does not propagate deletes to Prometheus (no remote-write delete "
                    + "semantic exists). Configure retention at the backend tier.",
-                    count, DELETE_WARN_INTERVAL_MS / 1000);
+                    count, TimeUnit.NANOSECONDS.toSeconds(DELETE_WARN_INTERVAL_NANOS));
         }
     }
 
-    // --- Accessors for the Karaf shell command ----------------------------
+    // --- Accessors for the Karaf shell command -----------------------------
 
-    public PluginMetrics getMetrics() { return metrics; }
-    public long getDeleteNoopTotal()  { return deleteNoopTotal.get(); }
+    public PluginMetrics getMetrics() {
+        Active a = active;
+        return a == null ? null : a.metrics();
+    }
 
-    // --- internals --------------------------------------------------------
+    public long getDeleteNoopTotal() { return deleteNoopTotal.get(); }
+
+    // --- internals ---------------------------------------------------------
 
     private void logActivationOrDiff() {
         PrometheusRemoteWriterConfig previous = LAST_ACTIVE.getAndSet(config);
@@ -219,18 +259,34 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         }
     }
 
-    private void registerGauges() {
-        metrics.registerLongGauge(PluginMetrics.QUEUE_DEPTH,            () -> (long) queue.depth());
-        metrics.registerLongGauge(PluginMetrics.SAMPLES_DROPPED_QUEUE_FULL,
-                                  queue::getSamplesDroppedQueueFull);
-        metrics.registerLongGauge(PluginMetrics.HTTP_BYTES_WRITTEN,     writeClient::getBytesWritten);
-        metrics.registerLongGauge(PluginMetrics.HTTP_WRITES_SUCCESSFUL, writeClient::getWritesSuccessful);
-        metrics.registerLongGauge(PluginMetrics.HTTP_WRITES_FAILED,
-                () -> writeClient.getWrites4xx()
-                    + writeClient.getWrites5xxExhausted()
-                    + writeClient.getWritesTransportError());
-        metrics.registerLongGauge(PluginMetrics.DELETE_NOOP,            this::getDeleteNoopTotal);
-        metrics.registerLongGauge(PluginMetrics.METADATA_DENYLIST_BLOCKED,
-                                  labelMapper::getMetadataDenylistBlockedCount);
+    private void registerGauges(Active a) {
+        PluginMetrics m = a.metrics();
+        // Every lambda below captures the Active parameter, so gauges continue
+        // reading the correct collaborators even if stop() has cleared the
+        // volatile `active`. The Active object itself stays alive as long as
+        // the registry holds these gauges.
+        m.registerLongGauge(PluginMetrics.QUEUE_DEPTH,              () -> (long) a.queue().depth());
+        m.registerLongGauge(PluginMetrics.SAMPLES_DROPPED_QUEUE_FULL, a.queue()::getSamplesDroppedQueueFull);
+        m.registerLongGauge(PluginMetrics.HTTP_BYTES_WRITTEN,       a.writeClient()::getBytesWritten);
+        m.registerLongGauge(PluginMetrics.HTTP_WRITES_SUCCESSFUL,   a.writeClient()::getWritesSuccessful);
+        m.registerLongGauge(PluginMetrics.HTTP_WRITES_FAILED,
+                () -> a.writeClient().getWrites4xx()
+                    + a.writeClient().getWrites5xxExhausted()
+                    + a.writeClient().getWritesTransportError());
+        m.registerLongGauge(PluginMetrics.HTTP_IN_FLIGHT,           () -> (long) a.writeClient().getInFlightCalls());
+        m.registerLongGauge(PluginMetrics.DELETE_NOOP,              this::getDeleteNoopTotal);
+        m.registerLongGauge(PluginMetrics.METADATA_DENYLIST_BLOCKED, a.labelMapper()::getMetadataDenylistBlockedCount);
+    }
+
+    private static void rollbackStart(Flusher f, RemoteWriteHttpClient wc, PrometheusReadClient rc) {
+        if (f != null) {
+            try { f.stop(0); } catch (RuntimeException ignored) {}
+        }
+        if (wc != null) {
+            try { wc.shutdown(); } catch (RuntimeException ignored) {}
+        }
+        if (rc != null) {
+            try { rc.shutdown(); } catch (RuntimeException ignored) {}
+        }
     }
 }

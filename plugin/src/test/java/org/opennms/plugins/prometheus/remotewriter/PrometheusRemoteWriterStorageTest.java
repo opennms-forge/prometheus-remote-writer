@@ -147,6 +147,50 @@ class PrometheusRemoteWriterStorageTest {
     }
 
     @Test
+    void second_start_on_same_bean_is_a_no_op() {
+        PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(minimal());
+        assertThatCode(s::start).doesNotThrowAnyException();
+        try {
+            PluginMetrics first = s.getMetrics();
+            assertThatCode(s::start).doesNotThrowAnyException();
+            PluginMetrics second = s.getMetrics();
+            // Idempotent: the existing pipeline is preserved, not rebuilt.
+            assertThat(second).isSameAs(first);
+        } finally {
+            s.stop();
+        }
+    }
+
+    @Test
+    void stop_then_start_produces_a_fresh_pipeline() {
+        PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(minimal());
+        s.start();
+        PluginMetrics first = s.getMetrics();
+        s.stop();
+        assertThat(s.getMetrics()).isNull();
+
+        s.start();
+        try {
+            PluginMetrics second = s.getMetrics();
+            assertThat(second).isNotNull();
+            assertThat(second).isNotSameAs(first);
+        } finally {
+            s.stop();
+        }
+    }
+
+    @Test
+    void http_in_flight_gauge_is_registered() {
+        PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(minimal());
+        s.start();
+        try {
+            assertThat(s.getMetrics().snapshot()).containsKey(PluginMetrics.HTTP_IN_FLIGHT);
+        } finally {
+            s.stop();
+        }
+    }
+
+    @Test
     void backend_returning_4xx_increments_drop_counter() throws Exception {
         try (MockWebServer server = new MockWebServer()) {
             server.start();

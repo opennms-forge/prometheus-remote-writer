@@ -38,6 +38,7 @@ public final class PluginMetrics {
     public static final String HTTP_BYTES_WRITTEN         = "http_bytes_written_total";
     public static final String HTTP_WRITES_SUCCESSFUL     = "http_writes_successful_total";
     public static final String HTTP_WRITES_FAILED         = "http_writes_failed_total";
+    public static final String HTTP_IN_FLIGHT             = "http_in_flight";
 
     private final MetricRegistry registry = new MetricRegistry();
     private final Counter samplesWritten;
