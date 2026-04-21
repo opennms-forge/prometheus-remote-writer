@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<features name="prometheus-remote-writer-${project.version}"
+          xmlns="http://karaf.apache.org/xmlns/features/v1.6.0">
+
+    <feature name="prometheus-remote-writer"
+             description="OpenNMS TSS plugin: writes samples to Prometheus-compatible Remote Write endpoints"
+             version="${project.version}">
+
+        <!-- Config file shipped into etc/ on install -->
+        <configfile finalname="${karaf.etc}/org.opennms.plugins.tss.prometheus-remote-writer.cfg"
+                    override="false">
+            mvn:org.opennms.plugins/prometheus-remote-writer/${project.version}/cfg/config
+        </configfile>
+
+        <!-- The plugin bundle itself. Runtime deps (OkHttp, snappy, protobuf,
+             dropwizard metrics) are embedded inside the bundle, so no additional
+             <bundle> entries are required here. -->
+        <bundle start-level="80">
+            mvn:org.opennms.plugins/prometheus-remote-writer/${project.version}
+        </bundle>
+
+    </feature>
+
+</features>

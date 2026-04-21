@@ -1,0 +1,219 @@
+/*
+ * Copyright 2026 The OpenNMS Group, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ */
+package org.opennms.plugins.prometheus.remotewriter.http;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+
+import okhttp3.ConnectionPool;
+import okhttp3.Dispatcher;
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
+import okhttp3.ResponseBody;
+import org.opennms.plugins.prometheus.remotewriter.config.PrometheusRemoteWriterConfig;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Synchronous HTTP client for Prometheus Remote Write v1.
+ *
+ * <p>Each call to {@link #write(byte[])} POSTs the supplied snappy-compressed
+ * payload to the configured write URL with the required RW v1 headers, any
+ * configured auth/tenant headers, and 5xx retry with exponential backoff
+ * (bounded by {@code retry.max-attempts}). 4xx responses are dropped
+ * immediately with the response body captured at WARN.
+ *
+ * <p>The client is thread-safe; the flusher (task group 8) will invoke
+ * {@code write()} from a single flush thread in v0.1, but the underlying
+ * {@link OkHttpClient} supports concurrency out of the box.
+ */
+public final class RemoteWriteHttpClient {
+
+    private static final Logger LOG = LoggerFactory.getLogger(RemoteWriteHttpClient.class);
+
+    private static final MediaType CONTENT_TYPE = MediaType.get("application/x-protobuf");
+    private static final String REMOTE_WRITE_VERSION = "0.1.0";
+    private static final String USER_AGENT =
+            "org.opennms.plugins.prometheus-remote-writer/" + pluginVersion();
+
+    public enum WriteOutcome {
+        /** HTTP 2xx. */
+        SUCCESS,
+        /** HTTP 4xx — batch dropped, no retry. */
+        DROPPED_4XX,
+        /** HTTP 5xx on every attempt including retries. */
+        DROPPED_5XX_EXHAUSTED,
+        /** IOException on every attempt including retries. */
+        TRANSPORT_ERROR
+    }
+
+    public record WriteResult(WriteOutcome outcome, int httpStatus, int attemptsMade, String detail) {}
+
+    private final OkHttpClient http;
+    private final PrometheusRemoteWriterConfig config;
+
+    private final AtomicLong writesSuccessful     = new AtomicLong();
+    private final AtomicLong writes4xx            = new AtomicLong();
+    private final AtomicLong writes5xxExhausted   = new AtomicLong();
+    private final AtomicLong writesTransportError = new AtomicLong();
+    private final AtomicLong bytesWritten         = new AtomicLong();
+
+    public RemoteWriteHttpClient(PrometheusRemoteWriterConfig config) {
+        this.config = config;
+        Dispatcher dispatcher = new Dispatcher();
+        dispatcher.setMaxRequests(config.getHttpMaxConnections());
+        dispatcher.setMaxRequestsPerHost(config.getHttpMaxConnections());
+
+        OkHttpClient.Builder b = new OkHttpClient.Builder()
+                .connectTimeout(config.getHttpConnectTimeoutMs(), TimeUnit.MILLISECONDS)
+                .readTimeout(config.getHttpReadTimeoutMs(),       TimeUnit.MILLISECONDS)
+                .writeTimeout(config.getHttpWriteTimeoutMs(),     TimeUnit.MILLISECONDS)
+                .connectionPool(new ConnectionPool(
+                        config.getHttpMaxConnections(), 5, TimeUnit.MINUTES))
+                .dispatcher(dispatcher);
+        TlsConfig.configure(b, config);
+        this.http = b.build();
+    }
+
+    /**
+     * POST the snappy-compressed WriteRequest payload. Blocks the calling
+     * thread across retries.
+     *
+     * @param snappyCompressedPayload bytes produced by {@code RemoteWriteRequestBuilder}
+     */
+    public WriteResult write(byte[] snappyCompressedPayload) {
+        Request request = buildRequest(snappyCompressedPayload);
+        int maxAttempts = Math.max(1, config.getRetryMaxAttempts());
+        long backoff = Math.max(1, config.getRetryInitialBackoffMs());
+        long maxBackoff = Math.max(backoff, config.getRetryMaxBackoffMs());
+
+        IOException lastIoEx = null;
+        int lastStatus = 0;
+        String lastBody = "";
+
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try (Response resp = http.newCall(request).execute()) {
+                int code = resp.code();
+                lastStatus = code;
+                if (resp.isSuccessful()) {
+                    writesSuccessful.incrementAndGet();
+                    bytesWritten.addAndGet(snappyCompressedPayload.length);
+                    return new WriteResult(WriteOutcome.SUCCESS, code, attempt, null);
+                }
+                if (code >= 400 && code < 500) {
+                    String body = readBodyQuiet(resp);
+                    LOG.warn("Prometheus remote-write rejected with {}: {}", code, body);
+                    writes4xx.incrementAndGet();
+                    return new WriteResult(WriteOutcome.DROPPED_4XX, code, attempt, body);
+                }
+                // 5xx: retry
+                lastBody = readBodyQuiet(resp);
+                LOG.warn("Prometheus remote-write returned {} on attempt {}/{}: {}",
+                         code, attempt, maxAttempts, lastBody);
+            } catch (IOException io) {
+                lastIoEx = io;
+                LOG.warn("Prometheus remote-write transport failure on attempt {}/{}: {}",
+                         attempt, maxAttempts, io.getMessage());
+            }
+
+            if (attempt < maxAttempts) {
+                if (!sleepInterruptibly(backoff)) {
+                    // interrupted: stop retrying
+                    return transportError(attempt, "interrupted during backoff");
+                }
+                backoff = Math.min(backoff * 2, maxBackoff);
+            }
+        }
+
+        if (lastIoEx != null && lastStatus == 0) {
+            writesTransportError.incrementAndGet();
+            return new WriteResult(WriteOutcome.TRANSPORT_ERROR, 0, maxAttempts, lastIoEx.getMessage());
+        }
+        writes5xxExhausted.incrementAndGet();
+        return new WriteResult(WriteOutcome.DROPPED_5XX_EXHAUSTED, lastStatus, maxAttempts, lastBody);
+    }
+
+    public void shutdown() {
+        http.dispatcher().executorService().shutdown();
+        http.connectionPool().evictAll();
+    }
+
+    // -- counter getters (wired to Dropwizard in task 11.1) -----------------
+
+    public long getWritesSuccessful()     { return writesSuccessful.get(); }
+    public long getWrites4xx()            { return writes4xx.get(); }
+    public long getWrites5xxExhausted()   { return writes5xxExhausted.get(); }
+    public long getWritesTransportError() { return writesTransportError.get(); }
+    public long getBytesWritten()         { return bytesWritten.get(); }
+
+    // -- internals ----------------------------------------------------------
+
+    private Request buildRequest(byte[] body) {
+        Request.Builder b = new Request.Builder()
+                .url(config.getWriteUrl())
+                .addHeader("Content-Encoding", "snappy")
+                .addHeader("X-Prometheus-Remote-Write-Version", REMOTE_WRITE_VERSION)
+                .addHeader("User-Agent", USER_AGENT);
+
+        if (config.hasBasicAuth()) {
+            String creds = config.getBasicUsername() + ":" + config.getBasicPassword();
+            String encoded = Base64.getEncoder()
+                    .encodeToString(creds.getBytes(StandardCharsets.UTF_8));
+            b.addHeader("Authorization", "Basic " + encoded);
+        } else if (config.hasBearerAuth()) {
+            b.addHeader("Authorization", "Bearer " + config.getBearerToken());
+        }
+        if (config.hasTenant()) {
+            b.addHeader("X-Scope-OrgID", config.getTenantOrgId());
+        }
+        b.post(RequestBody.create(body, CONTENT_TYPE));
+        return b.build();
+    }
+
+    private static String readBodyQuiet(Response resp) {
+        try (ResponseBody body = resp.body()) {
+            if (body == null) return "";
+            String s = body.string();
+            // Capped so a misbehaving backend can't blow up the log.
+            return s.length() > 512 ? s.substring(0, 512) + "…(truncated)" : s;
+        } catch (IOException io) {
+            return "(body read error: " + io.getMessage() + ")";
+        }
+    }
+
+    private static boolean sleepInterruptibly(long ms) {
+        try {
+            Thread.sleep(ms);
+            return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
+    private WriteResult transportError(int attempt, String detail) {
+        writesTransportError.incrementAndGet();
+        return new WriteResult(WriteOutcome.TRANSPORT_ERROR, 0, attempt, detail);
+    }
+
+    private static String pluginVersion() {
+        // Package attribute set by maven-bundle-plugin's manifest; fall back to
+        // a compile-time constant so unit tests don't depend on the manifest.
+        Package p = RemoteWriteHttpClient.class.getPackage();
+        String v = p != null ? p.getImplementationVersion() : null;
+        return v != null ? v : "0.1.0-dev";
+    }
+}
