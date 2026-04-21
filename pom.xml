@@ -53,7 +53,7 @@
         <mockito.version>5.23.0</mockito.version>
         <testcontainers.version>1.20.3</testcontainers.version>
         <okhttp-mockwebserver.version>4.12.0</okhttp-mockwebserver.version>
-        <awaitility.version>4.2.2</awaitility.version>
+        <awaitility.version>4.3.0</awaitility.version>
 
         <!-- Build plugin versions -->
         <maven-compiler-plugin.version>3.13.0</maven-compiler-plugin.version>
