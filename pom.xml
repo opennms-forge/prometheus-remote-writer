@@ -52,7 +52,7 @@
         <assertj.version>3.26.3</assertj.version>
         <mockito.version>5.23.0</mockito.version>
         <testcontainers.version>1.20.3</testcontainers.version>
-        <okhttp-mockwebserver.version>4.12.0</okhttp-mockwebserver.version>
+        <okhttp-mockwebserver.version>5.3.2</okhttp-mockwebserver.version>
         <awaitility.version>4.3.0</awaitility.version>
 
         <!-- Build plugin versions -->
@@ -82,9 +82,17 @@
                 <artifactId>tss-tests</artifactId>
                 <version>${opennms-integration-api.version}</version>
             </dependency>
+            <!--
+                OkHttp 5.x is a Kotlin Multiplatform project. The
+                `okhttp` artifact is a KMP-metadata stub with no JVM
+                classes — Gradle resolves the -jvm variant via Gradle
+                Module Metadata, but Maven can't read that. We depend on
+                `okhttp-jvm` directly to get real `okhttp3.*` classes on
+                the compile classpath.
+            -->
             <dependency>
                 <groupId>com.squareup.okhttp3</groupId>
-                <artifactId>okhttp</artifactId>
+                <artifactId>okhttp-jvm</artifactId>
                 <version>${okhttp.version}</version>
             </dependency>
             <dependency>
