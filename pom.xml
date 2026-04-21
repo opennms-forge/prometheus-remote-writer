@@ -45,7 +45,7 @@
         <slf4j.version>2.0.13</slf4j.version>
         <osgi.core.version>8.0.0</osgi.core.version>
         <osgi.cmpn.version>7.0.0</osgi.cmpn.version>
-        <karaf.version>4.4.6</karaf.version>
+        <karaf.version>4.4.10</karaf.version>
 
         <!-- Test dependency versions -->
         <junit-jupiter.version>5.11.3</junit-jupiter.version>
