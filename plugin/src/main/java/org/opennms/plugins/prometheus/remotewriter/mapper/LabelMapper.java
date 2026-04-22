@@ -1,0 +1,277 @@
+/*
+ * Copyright 2026 The OpenNMS Group, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ */
+package org.opennms.plugins.prometheus.remotewriter.mapper;
+
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.regex.Pattern;
+
+import org.opennms.integration.api.v1.timeseries.IntrinsicTagNames;
+import org.opennms.integration.api.v1.timeseries.Metric;
+import org.opennms.integration.api.v1.timeseries.Sample;
+import org.opennms.integration.api.v1.timeseries.Tag;
+import org.opennms.plugins.prometheus.remotewriter.config.PrometheusRemoteWriterConfig;
+import org.opennms.plugins.prometheus.remotewriter.sanitize.Sanitizer;
+import org.opennms.plugins.prometheus.remotewriter.wire.MappedSample;
+
+/**
+ * Turns an OpenNMS {@link Sample} into a {@link MappedSample} with the
+ * opinionated default label set and any operator-configured overrides.
+ *
+ * <p>Ordering of transformations (fixed):
+ * <ol>
+ *   <li>Build the default allowlist from the sample's tags</li>
+ *   <li>Apply {@code labels.exclude} globs — remove matching label names</li>
+ *   <li>Apply {@code labels.include} globs — surface matching source tag keys</li>
+ *   <li>Apply {@code labels.rename} — rename label names {@code from -> to}</li>
+ * </ol>
+ *
+ * <p>Label values are sanitized (truncated to {@link Sanitizer#MAX_LABEL_VALUE_BYTES}
+ * bytes); label names and the metric name are sanitized to the Prometheus
+ * text-model grammar.
+ *
+ * <p>Source-tag keys this mapper consults:
+ * <ul>
+ *   <li>{@code name} (intrinsic) — metric name</li>
+ *   <li>{@code resourceId} (intrinsic) — kept raw and parsed</li>
+ *   <li>{@code nodeId}, {@code foreignSource}, {@code foreignId}, {@code nodeLabel}, {@code location} — node identity</li>
+ *   <li>{@code ifName}, {@code ifDescr}, {@code ifSpeed}, {@code ifHighSpeed} — interface attributes</li>
+ *   <li>{@code categories} (comma-separated) — surveillance categories</li>
+ * </ul>
+ * Any other source tag is only surfaced when the operator opts in via
+ * {@code labels.include}.
+ */
+public final class LabelMapper {
+
+    private final List<Pattern> excludeGlobs;
+    private final List<Pattern> includeGlobs;
+    private final Map<String, String> renameMap;
+    private final String metricPrefix;
+    private final MetadataProcessor metadataProcessor;
+
+    public LabelMapper(PrometheusRemoteWriterConfig config) {
+        Objects.requireNonNull(config, "config");
+        this.excludeGlobs      = compileGlobs(config.labelsExcludeGlobs());
+        this.includeGlobs      = compileGlobs(config.labelsIncludeGlobs());
+        this.renameMap         = config.labelsRenameMap();
+        this.metricPrefix      = config.getMetricPrefix();
+        this.metadataProcessor = new MetadataProcessor(config);
+    }
+
+    public long getMetadataDenylistBlockedCount() {
+        return metadataProcessor.getDenylistBlockedCount();
+    }
+
+    /**
+     * @return a mapped sample, or {@code null} if the input sample has no
+     *         metric name (Prometheus requires {@code __name__})
+     */
+    public MappedSample map(Sample sample) {
+        Objects.requireNonNull(sample, "sample");
+        Metric metric = sample.getMetric();
+        Map<String, String> sourceTags = collectTags(metric);
+
+        String metricName = sourceTags.get(IntrinsicTagNames.name);
+        if (metricName == null || metricName.isEmpty()) {
+            return null;
+        }
+        if (metricPrefix != null && !metricPrefix.isEmpty()) {
+            metricName = metricPrefix + metricName;
+        }
+
+        Map<String, String> labels = buildDefaults(metricName, sourceTags);
+        labels = applyExclude(labels, excludeGlobs);
+        labels = applyInclude(labels, sourceTags, includeGlobs);
+        labels = applyRename(labels, renameMap);
+        // Metadata passthrough runs last so its prefix-namespaced labels are
+        // not renamed or excluded by labels.* rules; the default allowlist
+        // still wins on collisions.
+        metadataProcessor.emitInto(labels, sourceTags);
+
+        return new MappedSample(
+                labels,
+                sample.getTime().toEpochMilli(),
+                sample.getValue());
+    }
+
+    // -- defaults -------------------------------------------------------------
+
+    private static Map<String, String> buildDefaults(String metricName, Map<String, String> tags) {
+        Map<String, String> out = new LinkedHashMap<>();
+
+        // __name__
+        out.put("__name__", Sanitizer.metricName(metricName));
+
+        // resourceId raw + parsed components
+        String resourceId = tags.get(IntrinsicTagNames.resourceId);
+        ResourceIdParser.Parsed parsed = null;
+        if (resourceId != null) {
+            out.put("resourceId", Sanitizer.labelValue(resourceId));
+            parsed = ResourceIdParser.tryParse(resourceId);
+            if (parsed != null) {
+                out.put("resource_type",     Sanitizer.labelValue(parsed.resourceType()));
+                out.put("resource_instance", Sanitizer.labelValue(parsed.resourceInstance()));
+            }
+        }
+
+        // node identity — FS-qualified preferred, then parsed nodeId, then numeric dbId.
+        // A half-populated pair (one side empty or blank) falls through rather
+        // than emitting "fs:" or ":fid" with a dangling colon.
+        String fs  = tags.get("foreignSource");
+        String fid = tags.get("foreignId");
+        if (fs != null && !fs.isEmpty() && fid != null && !fid.isEmpty()) {
+            out.put("node", Sanitizer.labelValue(fs + ":" + fid));
+        } else if (parsed != null) {
+            out.put("node", Sanitizer.labelValue(parsed.nodeId()));
+        } else {
+            String nodeId = tags.get("nodeId");
+            if (nodeId != null && !nodeId.isEmpty()) {
+                out.put("node", Sanitizer.labelValue(nodeId));
+            }
+        }
+
+        putIfPresent(out, "node_label",     tags, "nodeLabel");
+        putIfPresent(out, "foreign_source", tags, "foreignSource");
+        putIfPresent(out, "foreign_id",     tags, "foreignId");
+        putIfPresent(out, "location",       tags, "location");
+        putIfPresent(out, "if_name",        tags, "ifName");
+        putIfPresent(out, "if_descr",       tags, "ifDescr");
+
+        // if_speed normalisation
+        Long ifSpeed = IfSpeedNormalizer.normalize(tags.get("ifHighSpeed"), tags.get("ifSpeed"));
+        if (ifSpeed != null) {
+            out.put("if_speed", Long.toString(ifSpeed));
+        }
+
+        // Surveillance categories: one label per category. Accepts a single
+        // `categories` tag with comma-separated values — the convention used
+        // by OpenNMS's TSS adapter as of v0.1. Revisit in 15.2 if real
+        // deployments surface categories differently.
+        String categories = tags.get("categories");
+        if (categories != null && !categories.isEmpty()) {
+            for (String cat : categories.split(",")) {
+                cat = cat.trim();
+                if (!cat.isEmpty()) {
+                    String labelName = "onms_cat_" + Sanitizer.labelName(cat);
+                    out.put(labelName, "true");
+                }
+            }
+        }
+        return out;
+    }
+
+    private static void putIfPresent(Map<String, String> out, String labelName,
+                                     Map<String, String> source, String sourceKey) {
+        String v = source.get(sourceKey);
+        if (v != null && !v.isEmpty()) {
+            out.put(labelName, Sanitizer.labelValue(v));
+        }
+    }
+
+    // -- exclude/include/rename ----------------------------------------------
+
+    private static Map<String, String> applyExclude(Map<String, String> labels, List<Pattern> excludeGlobs) {
+        if (excludeGlobs.isEmpty()) return labels;
+        Map<String, String> out = new LinkedHashMap<>(labels);
+        out.keySet().removeIf(name -> matchesAny(name, excludeGlobs));
+        return out;
+    }
+
+    private static Map<String, String> applyInclude(Map<String, String> labels,
+                                                    Map<String, String> sourceTags,
+                                                    List<Pattern> includeGlobs) {
+        if (includeGlobs.isEmpty()) return labels;
+        Map<String, String> out = new LinkedHashMap<>(labels);
+        for (Map.Entry<String, String> e : sourceTags.entrySet()) {
+            if (!matchesAny(e.getKey(), includeGlobs)) continue;
+            // Match the default allowlist's camelCase → snake_case convention
+            // (e.g. ifName → if_name) so an operator writing
+            // "labels.include = ifAlias" sees the same shape as the built-ins.
+            String labelName = Sanitizer.labelName(MetadataProcessor.toSnakeCase(e.getKey()));
+            // Don't overwrite defaults; the allowlist wins if it already
+            // emitted a label with this name.
+            out.putIfAbsent(labelName, Sanitizer.labelValue(e.getValue()));
+        }
+        return out;
+    }
+
+    private static Map<String, String> applyRename(Map<String, String> labels, Map<String, String> renameMap) {
+        if (renameMap.isEmpty()) return labels;
+        Map<String, String> out = new LinkedHashMap<>(labels.size());
+        for (Map.Entry<String, String> e : labels.entrySet()) {
+            String name = e.getKey();
+            String renamed = renameMap.get(name);
+            if (renamed != null) {
+                name = Sanitizer.labelName(renamed);
+            }
+            out.put(name, e.getValue());
+        }
+        return out;
+    }
+
+    // -- helpers --------------------------------------------------------------
+
+    /** Merge intrinsic + meta + external tags into one map; earlier entries win. */
+    private static Map<String, String> collectTags(Metric metric) {
+        Map<String, String> out = new LinkedHashMap<>();
+        for (Tag t : metric.getIntrinsicTags()) out.putIfAbsent(t.getKey(), t.getValue());
+        for (Tag t : metric.getMetaTags())      out.putIfAbsent(t.getKey(), t.getValue());
+        for (Tag t : metric.getExternalTags())  out.putIfAbsent(t.getKey(), t.getValue());
+        return out;
+    }
+
+    private static List<Pattern> compileGlobs(List<String> globs) {
+        if (globs.isEmpty()) return List.of();
+        List<Pattern> out = new ArrayList<>(globs.size());
+        for (String g : globs) {
+            out.add(globToPattern(g));
+        }
+        return List.copyOf(out);
+    }
+
+    /**
+     * Compile a glob (wildcards {@code *} and {@code ?}) into a case-sensitive regex.
+     * Dots, brackets, and other regex metacharacters are escaped.
+     */
+    static Pattern globToPattern(String glob) {
+        return globToPattern(glob, 0);
+    }
+
+    /**
+     * Compile a glob with {@link Pattern} flags — for denylist patterns that
+     * must match regardless of case ({@link Pattern#CASE_INSENSITIVE}).
+     */
+    static Pattern globToPattern(String glob, int flags) {
+        StringBuilder re = new StringBuilder(glob.length() + 4);
+        re.append('^');
+        for (int i = 0; i < glob.length(); i++) {
+            char c = glob.charAt(i);
+            switch (c) {
+                case '*' -> re.append(".*");
+                case '?' -> re.append('.');
+                case '.', '(', ')', '+', '|', '^', '$', '@', '%', '{', '}', '[', ']', '\\' ->
+                    re.append('\\').append(c);
+                default  -> re.append(c);
+            }
+        }
+        re.append('$');
+        return Pattern.compile(re.toString(), flags);
+    }
+
+    private static boolean matchesAny(String s, List<Pattern> patterns) {
+        for (Pattern p : patterns) {
+            if (p.matcher(s).matches()) return true;
+        }
+        return false;
+    }
+}
