@@ -33,10 +33,11 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   would silently clobber the default value. Pick a different 'to' name.
   ```
 
-  Migration: pick a non-reserved `to` name. Pre-upgrade, scan your cfg:
+  Migration: pick a non-reserved `to` name. Pre-upgrade, scan your cfg
+  (swap the etc path for your install's actual location):
 
   ```bash
-  grep -E '^labels\.rename' /opt/opennms/etc/org.opennms.plugins.tss.prometheusremotewriter.cfg
+  grep -E '^[[:space:]]*labels\.rename' /opt/opennms/etc/org.opennms.plugins.tss.prometheusremotewriter.cfg
   ```
 
 ### Added

@@ -168,13 +168,20 @@ labels.rename target 'foreign_source' collides with the default label
 silently clobber the default value. Pick a different 'to' name.
 ```
 
-Pre-upgrade check — scan your cfg for colliding rename targets:
+Pre-upgrade check — scan your cfg for colliding rename targets (use your
+installation's actual etc path; the default below is Horizon):
 
 ```bash
-grep -E '^labels\.rename' /opt/opennms/etc/org.opennms.plugins.tss.prometheusremotewriter.cfg
+grep -E '^[[:space:]]*labels\.rename' /opt/opennms/etc/org.opennms.plugins.tss.prometheusremotewriter.cfg
 ```
 
 Inspect each `from -> to` pair; any `to` in the table above needs a new name.
+
+> **Caveat** — the `onms_meta_*` prefix reservation covers only the plugin's
+> **default** metadata prefix. If you set `metadata.label-prefix` to something
+> other than `onms_meta_`, rename targets that collide with the customized
+> prefix are not caught by startup validation; pick non-colliding targets by
+> inspection. The default prefix is what the vast majority of deployments use.
 
 ## OpenNMS metadata — opt-in only
 
