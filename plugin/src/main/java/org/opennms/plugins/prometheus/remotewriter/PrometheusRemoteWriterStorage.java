@@ -270,11 +270,12 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         String iid = config.getInstanceId();
         if ((iid == null || iid.isEmpty())
                 && INSTANCE_ID_UNSET_WARNED.compareAndSet(false, true)) {
-            LOG.warn("instance.id is not set. This is fine for a single OpenNMS "
-                   + "instance writing to a dedicated backend. If you run multiple "
-                   + "OpenNMS instances against a shared Prometheus-compatible "
-                   + "backend, set instance.id to a stable per-instance identifier "
-                   + "so samples can be distinguished by the onms_instance_id label.");
+            LOG.warn("PrometheusRemoteWriter: instance.id is not set. This is fine "
+                   + "for a single OpenNMS instance writing to a dedicated backend. "
+                   + "If you run multiple OpenNMS instances against a shared "
+                   + "Prometheus-compatible backend, set instance.id to a stable "
+                   + "per-instance identifier so samples can be distinguished by "
+                   + "the onms_instance_id label.");
         }
     }
 

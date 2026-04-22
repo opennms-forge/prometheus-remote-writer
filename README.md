@@ -123,9 +123,20 @@ ifHCInOctets{onms_instance_id="opennms-us-west"}
 - `onms_instance_id` is honored by `labels.rename` and `labels.exclude` on the
   same terms as any other default label. If you prefer `cluster` or `tenant` or
   `fleet` as the label name, rename it.
+- **Override ordering**: the label pipeline applies `labels.exclude` first, then
+  `labels.include`, then `labels.rename`. This matters for `onms_instance_id`
+  specifically: `labels.exclude = onms_instance_id` drops it, and `labels.include`
+  does *not* resurrect excluded labels — the include pass only surfaces non-default
+  source tags. A rename whose *target* collides with an already-emitted default
+  (including `onms_instance_id`, `__name__`, `resourceId`, etc.) silently
+  overwrites the colliding entry; avoid targeting default-label names with
+  `labels.rename`.
 - When `instance.id` is unset, the plugin logs **one** `WARN` at startup
   pointing at the knob. This is informational — single-instance deployments
   can ignore or silence it by setting the value.
+- **Validation**: `instance.id` must not contain control characters (`\n`, `\t`,
+  `\0`, etc.) and must be ≤ 2048 UTF-8 bytes. Values that violate either rule
+  cause the plugin to refuse to start with an actionable error message.
 - The plugin cannot detect cross-process uniqueness of `instance.id`. If two
   OpenNMS instances configure the same value, their samples collide again.
   Pick stable, unique identifiers.

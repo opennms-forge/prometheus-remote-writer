@@ -139,6 +139,26 @@ public class PrometheusRemoteWriterConfig {
         if (shutdownGracePeriodMs < 0) {
             throw new IllegalStateException("shutdown.grace-period-ms must be >= 0");
         }
+        if (instanceId != null) {
+            // instance.id is emitted as a series-identity label on every sample;
+            // silent truncation / malformed text-format output would be
+            // worst-case (series collisions across instances, federation
+            // breakage). Reject at validate() with an actionable message.
+            for (int i = 0; i < instanceId.length(); i++) {
+                if (Character.isISOControl(instanceId.charAt(i))) {
+                    throw new IllegalStateException(
+                        "instance.id must not contain control characters "
+                        + "(\\n, \\t, \\0, etc.) — got one at offset " + i);
+                }
+            }
+            int bytes = instanceId.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+            if (bytes > Sanitizer.MAX_LABEL_VALUE_BYTES) {
+                throw new IllegalStateException(
+                    "instance.id is " + bytes + " UTF-8 bytes; must not exceed "
+                    + Sanitizer.MAX_LABEL_VALUE_BYTES
+                    + " (Prometheus label-value cap). Pick a shorter identifier.");
+            }
+        }
     }
 
     public boolean hasBasicAuth()  { return !isBlank(basicUsername) || !isBlank(basicPassword); }
@@ -320,8 +340,14 @@ public class PrometheusRemoteWriterConfig {
 
     private static String blankToNull(String s) {
         if (s == null) return null;
-        String trimmed = s.trim();
-        return trimmed.isEmpty() ? null : trimmed;
+        // Strip all Unicode whitespace — including NBSP (U+00A0), narrow NBSP
+        // (U+202F), figure space (U+2007), and ideographic space (U+3000).
+        // trim() strips ≤ U+0020 only; strip() uses Character.isWhitespace()
+        // which excludes non-breaking spaces. (?U)\s matches the full Unicode
+        // White_Space property, catching all of them. Without this,
+        // invisible-character-only config values pass through as valid.
+        String stripped = s.replaceAll("(?U)^\\s+|\\s+$", "");
+        return stripped.isEmpty() ? null : stripped;
     }
 
     private static List<String> parseCsv(String csv) {

@@ -12,6 +12,8 @@ package org.opennms.plugins.prometheus.remotewriter.mapper;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 
 import org.junit.jupiter.api.Test;
 import org.opennms.integration.api.v1.timeseries.Sample;
@@ -197,6 +199,20 @@ class LabelMapperTest {
         MappedSample out = new LabelMapper(c).map(interfaceSample());
         assertThat(out.labels()).containsEntry("cluster", "opennms-us-east");
         assertThat(out.labels()).doesNotContainKey("onms_instance_id");
+    }
+
+    @Test
+    void onms_instance_id_is_emitted_first_in_iteration_order() {
+        // Design decision §3 pins emission position: onms_instance_id goes in
+        // first. Iteration order of the emitted Map is load-bearing for the
+        // exclude/include/rename passes downstream, so guard against a future
+        // refactor that silently moves the put() call.
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setInstanceId("opennms-us-east");
+        MappedSample out = new LabelMapper(c).map(interfaceSample());
+        List<String> keys = new ArrayList<>(out.labels().keySet());
+        assertThat(keys.get(0)).isEqualTo("onms_instance_id");
+        assertThat(keys.get(1)).isEqualTo("__name__");
     }
 
     @Test
