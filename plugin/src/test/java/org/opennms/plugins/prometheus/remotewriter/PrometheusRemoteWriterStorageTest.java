@@ -22,7 +22,10 @@ import java.util.concurrent.TimeUnit;
 
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Execution;
+import org.junit.jupiter.api.parallel.ExecutionMode;
 import org.opennms.integration.api.v1.timeseries.Aggregation;
 import org.opennms.integration.api.v1.timeseries.StorageException;
 import org.opennms.integration.api.v1.timeseries.immutables.ImmutableMetric;
@@ -30,7 +33,79 @@ import org.opennms.integration.api.v1.timeseries.immutables.ImmutableSample;
 import org.opennms.plugins.prometheus.remotewriter.config.PrometheusRemoteWriterConfig;
 import org.opennms.plugins.prometheus.remotewriter.metrics.PluginMetrics;
 
+// Force sequential execution: several tests here share static state
+// (INSTANCE_ID_UNSET_WARNED, LAST_ACTIVE) that is intentionally JVM-scoped.
+// Parallel execution within this class would race the @BeforeEach reset
+// against a concurrent test's start(). Sequential today, immune to a
+// future project-wide parallel-tests switch.
+@Execution(ExecutionMode.SAME_THREAD)
 class PrometheusRemoteWriterStorageTest {
+
+    @BeforeEach
+    void resetInstanceIdWarnGate() {
+        // The WARN gate is a static one-shot; tests that start more than one
+        // storage bean need a clean slate so the gate can be observed flipping.
+        PrometheusRemoteWriterStorage.resetInstanceIdWarnedForTesting();
+    }
+
+    // ---------- instance.id startup WARN ------------------------------------
+
+    @Test
+    void instance_id_unset_trips_the_warn_gate_on_start() {
+        PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(minimal());
+        assertThat(PrometheusRemoteWriterStorage.isInstanceIdWarnedForTesting()).isFalse();
+        s.start();
+        try {
+            assertThat(PrometheusRemoteWriterStorage.isInstanceIdWarnedForTesting()).isTrue();
+        } finally {
+            s.stop();
+        }
+    }
+
+    @Test
+    void instance_id_set_does_not_trip_the_warn_gate() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setInstanceId("opennms-us-east");
+        PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(c);
+        s.start();
+        try {
+            assertThat(PrometheusRemoteWriterStorage.isInstanceIdWarnedForTesting()).isFalse();
+        } finally {
+            s.stop();
+        }
+    }
+
+    @Test
+    void warn_gate_stays_tripped_across_hot_reload_activations() {
+        // Simulates the blueprint rebuild-on-config-update path. The gate is
+        // static so the WARN fires exactly once per JVM regardless of how many
+        // times the blueprint container re-activates the bean with unset
+        // instance.id.
+        PrometheusRemoteWriterStorage first = new PrometheusRemoteWriterStorage(minimal());
+        first.start();
+        first.stop();
+        assertThat(PrometheusRemoteWriterStorage.isInstanceIdWarnedForTesting()).isTrue();
+
+        PrometheusRemoteWriterStorage second = new PrometheusRemoteWriterStorage(minimal());
+        second.start();
+        try {
+            // CAS already happened; a second start() cannot re-flip the gate.
+            assertThat(PrometheusRemoteWriterStorage.isInstanceIdWarnedForTesting()).isTrue();
+        } finally {
+            second.stop();
+        }
+    }
+
+    @Test
+    void warn_gate_not_tripped_when_config_is_invalid() {
+        // If validate() fails, warnIfInstanceIdUnset never runs — we don't
+        // want spurious WARNs while ConfigAdmin is still settling.
+        PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+        // deliberately leave write.url / read.url unset so validate() throws
+        PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(c);
+        s.start();
+        assertThat(PrometheusRemoteWriterStorage.isInstanceIdWarnedForTesting()).isFalse();
+    }
 
     @Test
     void start_tolerates_invalid_config_and_stays_inactive() {

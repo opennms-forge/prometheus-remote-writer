@@ -57,6 +57,7 @@ public final class LabelMapper {
     private final List<Pattern> includeGlobs;
     private final Map<String, String> renameMap;
     private final String metricPrefix;
+    private final String instanceId;
     private final MetadataProcessor metadataProcessor;
 
     public LabelMapper(PrometheusRemoteWriterConfig config) {
@@ -65,6 +66,7 @@ public final class LabelMapper {
         this.includeGlobs      = compileGlobs(config.labelsIncludeGlobs());
         this.renameMap         = config.labelsRenameMap();
         this.metricPrefix      = config.getMetricPrefix();
+        this.instanceId        = config.getInstanceId();
         this.metadataProcessor = new MetadataProcessor(config);
     }
 
@@ -89,7 +91,7 @@ public final class LabelMapper {
             metricName = metricPrefix + metricName;
         }
 
-        Map<String, String> labels = buildDefaults(metricName, sourceTags);
+        Map<String, String> labels = buildDefaults(metricName, sourceTags, instanceId);
         labels = applyExclude(labels, excludeGlobs);
         labels = applyInclude(labels, sourceTags, includeGlobs);
         labels = applyRename(labels, renameMap);
@@ -106,8 +108,14 @@ public final class LabelMapper {
 
     // -- defaults -------------------------------------------------------------
 
-    private static Map<String, String> buildDefaults(String metricName, Map<String, String> tags) {
+    private static Map<String, String> buildDefaults(String metricName, Map<String, String> tags, String instanceId) {
         Map<String, String> out = new LinkedHashMap<>();
+
+        // onms_instance_id — emitted first so it reads as the origin stamp
+        // when humans skim the series. Absent when instance.id is unset.
+        if (instanceId != null && !instanceId.isEmpty()) {
+            out.put("onms_instance_id", Sanitizer.labelValue(instanceId));
+        }
 
         // __name__
         out.put("__name__", Sanitizer.metricName(metricName));

@@ -35,6 +35,14 @@ public class PrometheusRemoteWriterConfig {
     private String writeUrl;
     private String readUrl;
 
+    // --- Source identity ---
+    /** Operator-supplied identifier for this OpenNMS instance. When non-empty,
+     *  every outbound sample carries an {@code onms_instance_id} label with
+     *  this value so operators running multiple OpenNMS instances against a
+     *  shared Prometheus-compatible backend can disambiguate samples in
+     *  PromQL. Orthogonal to {@link #tenantOrgId}; see README. */
+    private String instanceId;
+
     // --- Auth ---
     private String basicUsername;
     private String basicPassword;
@@ -131,6 +139,26 @@ public class PrometheusRemoteWriterConfig {
         if (shutdownGracePeriodMs < 0) {
             throw new IllegalStateException("shutdown.grace-period-ms must be >= 0");
         }
+        if (instanceId != null) {
+            // instance.id is emitted as a series-identity label on every sample;
+            // silent truncation / malformed text-format output would be
+            // worst-case (series collisions across instances, federation
+            // breakage). Reject at validate() with an actionable message.
+            for (int i = 0; i < instanceId.length(); i++) {
+                if (Character.isISOControl(instanceId.charAt(i))) {
+                    throw new IllegalStateException(
+                        "instance.id must not contain control characters "
+                        + "(\\n, \\t, \\0, etc.) — got one at offset " + i);
+                }
+            }
+            int bytes = instanceId.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+            if (bytes > Sanitizer.MAX_LABEL_VALUE_BYTES) {
+                throw new IllegalStateException(
+                    "instance.id is " + bytes + " UTF-8 bytes; must not exceed "
+                    + Sanitizer.MAX_LABEL_VALUE_BYTES
+                    + " (Prometheus label-value cap). Pick a shorter identifier.");
+            }
+        }
     }
 
     public boolean hasBasicAuth()  { return !isBlank(basicUsername) || !isBlank(basicPassword); }
@@ -183,6 +211,7 @@ public class PrometheusRemoteWriterConfig {
         List<String> out = new ArrayList<>();
         diffStr(out, "write.url",                 other.writeUrl,              writeUrl);
         diffStr(out, "read.url",                  other.readUrl,               readUrl);
+        diffStr(out, "instance.id",               other.instanceId,            instanceId);
         diffStr(out, "auth.basic.username",       other.basicUsername,         basicUsername);
         diffMasked(out, "auth.basic.password",    other.basicPassword,         basicPassword);
         diffMasked(out, "auth.bearer.token",      other.bearerToken,           bearerToken);
@@ -217,6 +246,7 @@ public class PrometheusRemoteWriterConfig {
 
     public void setWriteUrl(String v)              { writeUrl = blankToNull(v); }
     public void setReadUrl(String v)               { readUrl = blankToNull(v); }
+    public void setInstanceId(String v)            { instanceId = blankToNull(v); }
     public void setBasicUsername(String v)         { basicUsername = blankToNull(v); }
     public void setBasicPassword(String v)         { basicPassword = blankToNull(v); }
     public void setBearerToken(String v)           { bearerToken = blankToNull(v); }
@@ -275,6 +305,7 @@ public class PrometheusRemoteWriterConfig {
 
     public String  getWriteUrl()              { return writeUrl; }
     public String  getReadUrl()               { return readUrl; }
+    public String  getInstanceId()            { return instanceId; }
     public String  getBasicUsername()         { return basicUsername; }
     public String  getBasicPassword()         { return basicPassword; }
     public String  getBearerToken()           { return bearerToken; }
@@ -309,8 +340,14 @@ public class PrometheusRemoteWriterConfig {
 
     private static String blankToNull(String s) {
         if (s == null) return null;
-        String trimmed = s.trim();
-        return trimmed.isEmpty() ? null : trimmed;
+        // Strip all Unicode whitespace — including NBSP (U+00A0), narrow NBSP
+        // (U+202F), figure space (U+2007), and ideographic space (U+3000).
+        // trim() strips ≤ U+0020 only; strip() uses Character.isWhitespace()
+        // which excludes non-breaking spaces. (?U)\s matches the full Unicode
+        // White_Space property, catching all of them. Without this,
+        // invisible-character-only config values pass through as valid.
+        String stripped = s.replaceAll("(?U)^\\s+|\\s+$", "");
+        return stripped.isEmpty() ? null : stripped;
     }
 
     private static List<String> parseCsv(String csv) {

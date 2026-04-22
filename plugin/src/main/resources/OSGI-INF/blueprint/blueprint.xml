@@ -21,6 +21,8 @@
             <!-- Endpoint -->
             <cm:property name="write.url" value=""/>
             <cm:property name="read.url"  value=""/>
+            <!-- Source identity -->
+            <cm:property name="instance.id" value=""/>
             <!-- Auth -->
             <cm:property name="auth.basic.username" value=""/>
             <cm:property name="auth.basic.password" value=""/>
@@ -67,6 +69,7 @@
           class="org.opennms.plugins.prometheus.remotewriter.config.PrometheusRemoteWriterConfig">
         <property name="writeUrl"                value="${write.url}"/>
         <property name="readUrl"                 value="${read.url}"/>
+        <property name="instanceId"              value="${instance.id}"/>
         <property name="basicUsername"           value="${auth.basic.username}"/>
         <property name="basicPassword"           value="${auth.basic.password}"/>
         <property name="bearerToken"             value="${auth.bearer.token}"/>
