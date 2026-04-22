@@ -12,11 +12,14 @@ package org.opennms.plugins.prometheus.remotewriter.config;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
+import org.opennms.plugins.prometheus.remotewriter.mapper.LabelMapper;
 import org.opennms.plugins.prometheus.remotewriter.sanitize.Sanitizer;
 
 /**
@@ -103,6 +106,7 @@ public class PrometheusRemoteWriterConfig {
                 "read.url is required — configure it in "
                 + "etc/org.opennms.plugins.tss.prometheusremotewriter.cfg");
         }
+        validateRenameTargets();
         if (hasBasicAuth() && hasBearerAuth()) {
             throw new IllegalStateException(
                 "auth.basic.* and auth.bearer.token are mutually exclusive — "
@@ -161,6 +165,63 @@ public class PrometheusRemoteWriterConfig {
         }
     }
 
+    /**
+     * Reject {@code labels.rename} entries whose {@code to} target would
+     * silently clobber a default-allowlist label at flush time, or duplicate
+     * another rename's target. Invoked from {@link #validate()}.
+     *
+     * <p>Runtime-level collisions that arise from {@code labels.include}
+     * surfacing a source tag whose snake-cased name happens to match a rename
+     * target are NOT caught here — they depend on per-sample tag presence and
+     * can only be observed at flush. Static-known collisions are caught.
+     */
+    private void validateRenameTargets() {
+        Map<String, String> renameMap = labelsRenameMap();   // may throw on bad syntax
+        if (renameMap.isEmpty()) return;
+        // Accumulate all errors so operators see every bad entry in one log
+        // line instead of fix-restart-fix-restart. Skip secondary checks on
+        // entries that already hit a reserved-name or reserved-prefix
+        // violation; re-reporting the same target for "also duplicate" is
+        // noise.
+        List<String> errors = new ArrayList<>();
+        Set<String> seenTargets = new HashSet<>();
+        for (Map.Entry<String, String> e : renameMap.entrySet()) {
+            String to = e.getValue();
+            if (LabelMapper.RESERVED_LABEL_NAMES.contains(to)) {
+                errors.add(
+                    "labels.rename target '" + to + "' collides with the default label '" + to
+                    + "'. The plugin already emits this label; renaming onto it would silently "
+                    + "clobber the default value. Pick a different 'to' name.");
+                continue;
+            }
+            boolean prefixCollision = false;
+            for (String prefix : LabelMapper.RESERVED_LABEL_PREFIXES) {
+                if (to.startsWith(prefix)) {
+                    String reason = prefix.equals("onms_cat_")
+                            ? "surveillance categories"
+                            : "metadata passthrough";
+                    errors.add(
+                        "labels.rename target '" + to + "' collides with the reserved prefix '"
+                        + prefix + "*' (" + reason + "). Pick a different 'to' name.");
+                    prefixCollision = true;
+                    break;
+                }
+            }
+            if (prefixCollision) continue;
+            if (!seenTargets.add(to)) {
+                errors.add(
+                    "labels.rename has two entries with the same target '" + to
+                    + "'. At most one rename can target a given label name.");
+            }
+        }
+        if (!errors.isEmpty()) {
+            String suffix = errors.size() == 1 ? "" : "s";
+            throw new IllegalStateException(
+                "labels.rename has " + errors.size() + " error" + suffix + ":\n  - "
+                + String.join("\n  - ", errors));
+        }
+    }
+
     public boolean hasBasicAuth()  { return !isBlank(basicUsername) || !isBlank(basicPassword); }
     public boolean hasBearerAuth() { return !isBlank(bearerToken); }
     public boolean hasTenant()     { return !isBlank(tenantOrgId); }
@@ -193,6 +254,15 @@ public class PrometheusRemoteWriterConfig {
             if (from.isEmpty() || to.isEmpty()) {
                 throw new IllegalStateException(
                     "labels.rename entry has empty side: " + pair);
+            }
+            // Reject duplicate 'from' — LinkedHashMap.put would silently drop
+            // the earlier entry, producing a config that parses cleanly but
+            // keeps only the last rename. That's almost always a copy-paste
+            // error; refuse to start.
+            if (out.containsKey(from)) {
+                throw new IllegalStateException(
+                    "labels.rename has two entries with the same 'from' key '" + from
+                    + "'. At most one rename can originate from a given label.");
             }
             out.put(from, to);
         }

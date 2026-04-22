@@ -108,6 +108,21 @@ class PrometheusRemoteWriterStorageTest {
     }
 
     @Test
+    void reserved_rename_target_leaves_service_inactive() {
+        // A labels.rename whose target collides with a default-allowlist name
+        // is rejected by validate(); start() catches the IllegalStateException
+        // and leaves `active` null so OpenNMS sees no writable TSS until the
+        // operator corrects the cfg.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsRename("foreign_source -> __name__");
+        PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(c);
+        assertThatCode(s::start).doesNotThrowAnyException();
+        assertThatThrownBy(() -> s.store(List.of()))
+            .isInstanceOf(StorageException.class)
+            .hasMessageContaining("not accepting writes");
+    }
+
+    @Test
     void start_tolerates_invalid_config_and_stays_inactive() {
         // start() must not throw even when config is bad — throwing would
         // permanently kill the blueprint container and defeat the

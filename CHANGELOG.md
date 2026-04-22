@@ -7,6 +7,42 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed (BREAKING)
+
+- **`labels.rename` targets are now validated at startup.** Entries whose
+  `to` value collides with a default-allowlist label name or a reserved prefix
+  cause the plugin to refuse to start with an actionable error message.
+  Duplicate rename targets across entries (`a -> cluster, b -> cluster`) and
+  duplicate `from` keys (`a -> cluster, a -> tenant` — the second silently
+  overwrote the first before) are likewise rejected. Multiple rename errors
+  are accumulated into one startup error so operators fix-once, restart-once.
+  Previously these configs were accepted and silently clobbered the colliding
+  default at flush time — a data-quality incident with no visibility surface.
+
+  Reserved exact targets: `__name__`, `resourceId`, `node`, `foreign_source`,
+  `foreign_id`, `node_label`, `location`, `resource_type`, `resource_instance`,
+  `if_name`, `if_descr`, `if_speed`, `onms_instance_id`.
+  Reserved prefixes: `onms_cat_*`, `onms_meta_*`.
+
+  The `onms_instance_id` name is reserved unconditionally, even when
+  `instance.id` is unset, so a subsequent hot-reload enabling the knob cannot
+  unmask an already-broken rename.
+
+  Error message shape:
+
+  ```
+  labels.rename target 'foreign_source' collides with the default label
+  'foreign_source'. The plugin already emits this label; renaming onto it
+  would silently clobber the default value. Pick a different 'to' name.
+  ```
+
+  Migration: pick a non-reserved `to` name. Pre-upgrade, scan your cfg
+  (swap the etc path for your install's actual location):
+
+  ```bash
+  grep -E '^[[:space:]]*labels\.rename' /opt/opennms/etc/org.opennms.plugins.tss.prometheusremotewriter.cfg
+  ```
+
 ### Added
 
 - **`instance.id` config and `onms_instance_id` label** — stamps every
