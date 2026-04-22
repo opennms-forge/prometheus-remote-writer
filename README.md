@@ -127,10 +127,9 @@ ifHCInOctets{onms_instance_id="opennms-us-west"}
   `labels.include`, then `labels.rename`. This matters for `onms_instance_id`
   specifically: `labels.exclude = onms_instance_id` drops it, and `labels.include`
   does *not* resurrect excluded labels — the include pass only surfaces non-default
-  source tags. A rename whose *target* collides with an already-emitted default
-  (including `onms_instance_id`, `__name__`, `resourceId`, etc.) silently
-  overwrites the colliding entry; avoid targeting default-label names with
-  `labels.rename`.
+  source tags. `labels.rename` targets that collide with a default label name (or
+  with another rename's target) are rejected at startup with an actionable error —
+  see [Reserved rename targets](#reserved-rename-targets) below.
 - When `instance.id` is unset, the plugin logs **one** `WARN` at startup
   pointing at the knob. This is informational — single-instance deployments
   can ignore or silence it by setting the value.
@@ -140,6 +139,42 @@ ifHCInOctets{onms_instance_id="opennms-us-west"}
 - The plugin cannot detect cross-process uniqueness of `instance.id`. If two
   OpenNMS instances configure the same value, their samples collide again.
   Pick stable, unique identifiers.
+
+#### Reserved rename targets
+
+The plugin rejects `labels.rename` entries whose *target* would silently clobber
+an already-emitted label at flush time. Reserved targets:
+
+| Kind | Value | Why |
+|---|---|---|
+| Exact | `__name__` | Prometheus metric name. |
+| Exact | `resourceId` | OpenNMS resource identifier (raw, lossless). |
+| Exact | `node` | Derived FS-qualified or numeric node id. |
+| Exact | `foreign_source`, `foreign_id` | Requisition identity. |
+| Exact | `node_label` | Node's human-readable name. |
+| Exact | `location` | OpenNMS monitoring location. |
+| Exact | `resource_type`, `resource_instance` | Parsed from `resourceId`. |
+| Exact | `if_name`, `if_descr`, `if_speed` | SNMP interface descriptors. |
+| Exact | `onms_instance_id` | Multi-instance origin stamp (reserved even when `instance.id` is unset). |
+| Prefix | `onms_cat_*` | Per-surveillance-category expansion. |
+| Prefix | `onms_meta_*` | Default metadata-passthrough prefix. |
+
+Duplicate rename targets (`foo -> cluster, bar -> cluster`) are also rejected.
+The plugin refuses to start with a message naming the offending value:
+
+```
+labels.rename target 'foreign_source' collides with the default label
+'foreign_source'. The plugin already emits this label; renaming onto it would
+silently clobber the default value. Pick a different 'to' name.
+```
+
+Pre-upgrade check — scan your cfg for colliding rename targets:
+
+```bash
+grep -E '^labels\.rename' /opt/opennms/etc/org.opennms.plugins.tss.prometheusremotewriter.cfg
+```
+
+Inspect each `from -> to` pair; any `to` in the table above needs a new name.
 
 ## OpenNMS metadata — opt-in only
 

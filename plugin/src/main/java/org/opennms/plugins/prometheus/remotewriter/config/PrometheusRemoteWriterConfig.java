@@ -12,11 +12,14 @@ package org.opennms.plugins.prometheus.remotewriter.config;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
+import org.opennms.plugins.prometheus.remotewriter.mapper.LabelMapper;
 import org.opennms.plugins.prometheus.remotewriter.sanitize.Sanitizer;
 
 /**
@@ -103,6 +106,7 @@ public class PrometheusRemoteWriterConfig {
                 "read.url is required — configure it in "
                 + "etc/org.opennms.plugins.tss.prometheusremotewriter.cfg");
         }
+        validateRenameTargets();
         if (hasBasicAuth() && hasBearerAuth()) {
             throw new IllegalStateException(
                 "auth.basic.* and auth.bearer.token are mutually exclusive — "
@@ -157,6 +161,46 @@ public class PrometheusRemoteWriterConfig {
                     "instance.id is " + bytes + " UTF-8 bytes; must not exceed "
                     + Sanitizer.MAX_LABEL_VALUE_BYTES
                     + " (Prometheus label-value cap). Pick a shorter identifier.");
+            }
+        }
+    }
+
+    /**
+     * Reject {@code labels.rename} entries whose {@code to} target would
+     * silently clobber a default-allowlist label at flush time, or duplicate
+     * another rename's target. Invoked from {@link #validate()}.
+     *
+     * <p>Runtime-level collisions that arise from {@code labels.include}
+     * surfacing a source tag whose snake-cased name happens to match a rename
+     * target are NOT caught here — they depend on per-sample tag presence and
+     * can only be observed at flush. Static-known collisions are caught.
+     */
+    private void validateRenameTargets() {
+        Map<String, String> renameMap = labelsRenameMap();   // may throw on bad syntax
+        if (renameMap.isEmpty()) return;
+        Set<String> seenTargets = new HashSet<>();
+        for (Map.Entry<String, String> e : renameMap.entrySet()) {
+            String to = e.getValue();
+            if (LabelMapper.RESERVED_LABEL_NAMES.contains(to)) {
+                throw new IllegalStateException(
+                    "labels.rename target '" + to + "' collides with the default label '" + to
+                    + "'. The plugin already emits this label; renaming onto it would silently "
+                    + "clobber the default value. Pick a different 'to' name.");
+            }
+            for (String prefix : LabelMapper.RESERVED_LABEL_PREFIXES) {
+                if (to.startsWith(prefix)) {
+                    String reason = prefix.equals("onms_cat_")
+                            ? "surveillance categories"
+                            : "metadata passthrough";
+                    throw new IllegalStateException(
+                        "labels.rename target '" + to + "' collides with the reserved prefix '"
+                        + prefix + "*' (" + reason + "). Pick a different 'to' name.");
+                }
+            }
+            if (!seenTargets.add(to)) {
+                throw new IllegalStateException(
+                    "labels.rename has two entries with the same target '" + to
+                    + "'. At most one rename can target a given label name.");
             }
         }
     }

@@ -14,6 +14,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 import org.opennms.integration.api.v1.timeseries.IntrinsicTagNames;
@@ -52,6 +53,44 @@ import org.opennms.plugins.prometheus.remotewriter.wire.MappedSample;
  * {@code labels.include}.
  */
 public final class LabelMapper {
+
+    /**
+     * Label names emitted unconditionally (modulo config) by {@link #buildDefaults}.
+     * Used by {@link PrometheusRemoteWriterConfig#validate} to reject
+     * {@code labels.rename} entries whose target would silently clobber a
+     * default label at flush time.
+     *
+     * <p>Keep in sync with {@link #buildDefaults} — a new default-label emission
+     * added there must also land here, or operators lose the startup safety net.
+     */
+    public static final Set<String> RESERVED_LABEL_NAMES = Set.of(
+            "__name__",
+            "resourceId",
+            "node",
+            "foreign_source",
+            "foreign_id",
+            "node_label",
+            "location",
+            "resource_type",
+            "resource_instance",
+            "if_name",
+            "if_descr",
+            "if_speed",
+            "onms_instance_id");
+
+    /**
+     * Label-name prefixes reserved because multiple labels may be emitted
+     * under them. Renaming onto a matching target would collide with one of
+     * those emissions at flush time.
+     *
+     * <p>{@code onms_cat_*} covers per-surveillance-category expansion.
+     * {@code onms_meta_*} is the default {@code metadata.label-prefix}; an
+     * operator who customizes that prefix is out of scope for this guard.
+     * Keep in sync with {@link #buildDefaults} and {@link MetadataProcessor}.
+     */
+    public static final List<String> RESERVED_LABEL_PREFIXES = List.of(
+            "onms_cat_",
+            "onms_meta_");
 
     private final List<Pattern> excludeGlobs;
     private final List<Pattern> includeGlobs;
