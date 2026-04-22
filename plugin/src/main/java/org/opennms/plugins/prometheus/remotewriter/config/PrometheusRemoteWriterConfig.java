@@ -178,30 +178,47 @@ public class PrometheusRemoteWriterConfig {
     private void validateRenameTargets() {
         Map<String, String> renameMap = labelsRenameMap();   // may throw on bad syntax
         if (renameMap.isEmpty()) return;
+        // Accumulate all errors so operators see every bad entry in one log
+        // line instead of fix-restart-fix-restart. Skip secondary checks on
+        // entries that already hit a reserved-name or reserved-prefix
+        // violation; re-reporting the same target for "also duplicate" is
+        // noise.
+        List<String> errors = new ArrayList<>();
         Set<String> seenTargets = new HashSet<>();
         for (Map.Entry<String, String> e : renameMap.entrySet()) {
             String to = e.getValue();
             if (LabelMapper.RESERVED_LABEL_NAMES.contains(to)) {
-                throw new IllegalStateException(
+                errors.add(
                     "labels.rename target '" + to + "' collides with the default label '" + to
                     + "'. The plugin already emits this label; renaming onto it would silently "
                     + "clobber the default value. Pick a different 'to' name.");
+                continue;
             }
+            boolean prefixCollision = false;
             for (String prefix : LabelMapper.RESERVED_LABEL_PREFIXES) {
                 if (to.startsWith(prefix)) {
                     String reason = prefix.equals("onms_cat_")
                             ? "surveillance categories"
                             : "metadata passthrough";
-                    throw new IllegalStateException(
+                    errors.add(
                         "labels.rename target '" + to + "' collides with the reserved prefix '"
                         + prefix + "*' (" + reason + "). Pick a different 'to' name.");
+                    prefixCollision = true;
+                    break;
                 }
             }
+            if (prefixCollision) continue;
             if (!seenTargets.add(to)) {
-                throw new IllegalStateException(
+                errors.add(
                     "labels.rename has two entries with the same target '" + to
                     + "'. At most one rename can target a given label name.");
             }
+        }
+        if (!errors.isEmpty()) {
+            String suffix = errors.size() == 1 ? "" : "s";
+            throw new IllegalStateException(
+                "labels.rename has " + errors.size() + " error" + suffix + ":\n  - "
+                + String.join("\n  - ", errors));
         }
     }
 
@@ -237,6 +254,15 @@ public class PrometheusRemoteWriterConfig {
             if (from.isEmpty() || to.isEmpty()) {
                 throw new IllegalStateException(
                     "labels.rename entry has empty side: " + pair);
+            }
+            // Reject duplicate 'from' — LinkedHashMap.put would silently drop
+            // the earlier entry, producing a config that parses cleanly but
+            // keeps only the last rename. That's almost always a copy-paste
+            // error; refuse to start.
+            if (out.containsKey(from)) {
+                throw new IllegalStateException(
+                    "labels.rename has two entries with the same 'from' key '" + from
+                    + "'. At most one rename can originate from a given label.");
             }
             out.put(from, to);
         }

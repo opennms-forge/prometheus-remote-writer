@@ -159,8 +159,11 @@ an already-emitted label at flush time. Reserved targets:
 | Prefix | `onms_cat_*` | Per-surveillance-category expansion. |
 | Prefix | `onms_meta_*` | Default metadata-passthrough prefix. |
 
-Duplicate rename targets (`foo -> cluster, bar -> cluster`) are also rejected.
-The plugin refuses to start with a message naming the offending value:
+Duplicate rename targets (`foo -> cluster, bar -> cluster`) and duplicate
+`from` keys (`a -> cluster, a -> tenant` — the second silently overwrote the
+first before) are also rejected. When multiple rename entries have errors,
+the plugin reports all of them in one startup error so you fix once and
+restart once:
 
 ```
 labels.rename target 'foreign_source' collides with the default label

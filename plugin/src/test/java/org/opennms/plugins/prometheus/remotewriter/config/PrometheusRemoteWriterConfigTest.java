@@ -362,6 +362,58 @@ class PrometheusRemoteWriterConfigTest {
         assertThatCode(c::validate).doesNotThrowAnyException();
     }
 
+    @Test
+    void labels_rename_multiple_errors_are_accumulated_into_one_exception() {
+        // foo -> __name__     -> reserved exact
+        // bar -> onms_cat_x   -> reserved prefix
+        // baz -> cluster      -> ok (first time)
+        // qux -> cluster      -> duplicate target of baz
+        // Expect 3 distinct errors reported in one IllegalStateException.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsRename("foo -> __name__, bar -> onms_cat_x, baz -> cluster, qux -> cluster");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.rename has 3 errors")
+            .hasMessageContaining("__name__")
+            .hasMessageContaining("onms_cat_")
+            .hasMessageContaining("same target");
+    }
+
+    @Test
+    void labels_rename_single_error_uses_singular_phrasing() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsRename("foo -> __name__");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.rename has 1 error:")
+            .hasMessageContaining("__name__");
+    }
+
+    @Test
+    void labels_rename_duplicate_from_entries_are_rejected_at_parse() {
+        // 'a -> cluster, a -> tenant' parses to {a=tenant} under a plain
+        // LinkedHashMap put; silently dropping the first entry is a
+        // copy-paste-error footgun. Reject at labelsRenameMap() — surfaces
+        // during validate() too since validate() calls labelsRenameMap().
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsRename("a -> cluster, a -> tenant");
+        assertThatThrownBy(c::labelsRenameMap)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.rename")
+            .hasMessageContaining("same 'from'")
+            .hasMessageContaining("'a'");
+    }
+
+    @Test
+    void labels_rename_duplicate_from_entries_are_rejected_at_validate() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsRename("a -> cluster, a -> tenant");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("same 'from'")
+            .hasMessageContaining("'a'");
+    }
+
     // ---------- diff --------------------------------------------------------
 
     @Test

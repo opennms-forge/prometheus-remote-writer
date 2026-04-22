@@ -12,9 +12,12 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`labels.rename` targets are now validated at startup.** Entries whose
   `to` value collides with a default-allowlist label name or a reserved prefix
   cause the plugin to refuse to start with an actionable error message.
-  Duplicate rename targets across entries are likewise rejected. Previously
-  such configs were accepted and silently clobbered the colliding default at
-  flush time — a data-quality incident with no visibility surface.
+  Duplicate rename targets across entries (`a -> cluster, b -> cluster`) and
+  duplicate `from` keys (`a -> cluster, a -> tenant` — the second silently
+  overwrote the first before) are likewise rejected. Multiple rename errors
+  are accumulated into one startup error so operators fix-once, restart-once.
+  Previously these configs were accepted and silently clobbered the colliding
+  default at flush time — a data-quality incident with no visibility surface.
 
   Reserved exact targets: `__name__`, `resourceId`, `node`, `foreign_source`,
   `foreign_id`, `node_label`, `location`, `resource_type`, `resource_instance`,
