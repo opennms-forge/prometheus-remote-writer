@@ -1,0 +1,99 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.1.0). Must already exist.'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build KAR and create GitHub Release
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654  # v5.2.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Cache Maven repository
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-m2-
+
+      - name: Build KAR
+        # Skip tests on the release path — CI already ran `make verify` on
+        # the tagged commit before it was pushed. Shipping an untested
+        # build would be a problem, but gating here is belt-and-braces.
+        run: make kar MAVEN_FLAGS="-B --no-transfer-progress -U"
+
+      - name: Resolve tag and version
+        id: resolve
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Extract release notes from CHANGELOG
+        id: notes
+        run: |
+          VERSION="${{ steps.resolve.outputs.version }}"
+          if [ ! -f CHANGELOG.md ]; then
+            echo "CHANGELOG.md not found; using auto-generated notes" >&2
+            exit 0
+          fi
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { p=1; next }
+            p && /^## \[/ { exit }
+            p { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "No CHANGELOG entry for $VERSION; using auto-generated notes" >&2
+          else
+            echo "notes-file=release-notes.md" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Locate KAR artifact
+        id: kar
+        run: |
+          KAR=$(find assembly/kar/target -maxdepth 1 -name '*.kar' -type f | head -1)
+          if [ -z "$KAR" ]; then
+            echo "::error::No KAR found in assembly/kar/target" >&2
+            exit 1
+          fi
+          echo "path=$KAR" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.resolve.outputs.tag }}"
+          KAR="${{ steps.kar.outputs.path }}"
+          if [ -n "${{ steps.notes.outputs.notes-file }}" ]; then
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --notes-file "${{ steps.notes.outputs.notes-file }}" \
+              "$KAR"
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --generate-notes \
+              "$KAR"
+          fi
