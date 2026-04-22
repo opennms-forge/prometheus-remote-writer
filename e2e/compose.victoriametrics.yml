@@ -1,0 +1,61 @@
+# E2E sandbox — VictoriaMetrics backend.
+#
+# Usage:
+#   make -C .. kar                             # build the KAR once
+#   docker compose -f compose.victoriametrics.yml up -d
+#   docker compose -f compose.victoriametrics.yml down -v
+#
+# UI endpoints:
+#   http://localhost:8980   OpenNMS (admin/admin)
+#   http://localhost:3000   Grafana (admin/admin, or anonymous Viewer)
+#   http://localhost:8428   VictoriaMetrics
+#
+# See compose.prometheus.yml for the `extends:` rationale.
+
+name: prometheus-remote-writer-e2e
+
+services:
+
+  postgres:
+    extends:
+      file: compose.base.yml
+      service: postgres
+
+  core:
+    extends:
+      file: compose.base.yml
+      service: core
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./opennms/victoriametrics.cfg:/opt/opennms-etc-overlay/org.opennms.plugins.tss.prometheusremotewriter.cfg:ro
+
+  grafana:
+    extends:
+      file: compose.base.yml
+      service: grafana
+    volumes:
+      - ./grafana/datasources/victoriametrics.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
+
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:v1.107.0
+    command:
+      - "-storageDataPath=/vm-data"
+      - "-retentionPeriod=7d"
+      - "-httpListenAddr=:8428"
+    ports:
+      - "8428:8428"
+    volumes:
+      - vm-data:/vm-data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8428/health"]
+      interval: 5s
+      timeout:  3s
+      retries:  20
+
+volumes:
+  postgres-data:
+  opennms-data:
+  grafana-data:
+  vm-data:

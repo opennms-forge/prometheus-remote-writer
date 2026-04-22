@@ -1,0 +1,10 @@
+# Minimal Prometheus config for the E2E sandbox.
+# The plugin pushes samples via remote-write; Prometheus stores them and
+# serves the query API back at /api/v1/*.
+
+global:
+  scrape_interval:     60s
+  evaluation_interval: 60s
+
+# No scrape jobs — samples arrive via remote-write from OpenNMS core.
+scrape_configs: []

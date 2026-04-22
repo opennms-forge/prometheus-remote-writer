@@ -1,0 +1,68 @@
+# E2E sandbox — Prometheus backend.
+#
+# Usage:
+#   make -C .. kar                             # build the KAR once
+#   docker compose -f compose.prometheus.yml up -d
+#   docker compose -f compose.prometheus.yml down -v
+#
+# UI endpoints:
+#   http://localhost:8980   OpenNMS (admin/admin)
+#   http://localhost:3000   Grafana (admin/admin, or anonymous Viewer)
+#   http://localhost:9090   Prometheus
+#
+# The postgres / core / grafana definitions live in compose.base.yml.
+# We `extends:` each of them here so the per-backend bind-mounts for the
+# plugin cfg and the Grafana datasource append onto the base volume
+# list instead of duplicating the whole service. `depends_on` is not
+# copied by `extends` (Compose spec), so core re-declares it.
+
+name: prometheus-remote-writer-e2e
+
+services:
+
+  postgres:
+    extends:
+      file: compose.base.yml
+      service: postgres
+
+  core:
+    extends:
+      file: compose.base.yml
+      service: core
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./opennms/prometheus.cfg:/opt/opennms-etc-overlay/org.opennms.plugins.tss.prometheusremotewriter.cfg:ro
+
+  grafana:
+    extends:
+      file: compose.base.yml
+      service: grafana
+    volumes:
+      - ./grafana/datasources/prometheus.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
+
+  prometheus:
+    image: prom/prometheus:v2.53.2
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-remote-write-receiver"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/ready"]
+      interval: 5s
+      timeout:  3s
+      retries:  20
+
+volumes:
+  postgres-data:
+  opennms-data:
+  grafana-data:
+  prometheus-data:

@@ -1,0 +1,93 @@
+# Shared services for the e2e sandbox: postgres, OpenNMS core, Grafana.
+#
+# Not meant to be run on its own — it has no backend. The per-backend
+# files (compose.prometheus.yml, compose.mimir.yml,
+# compose.victoriametrics.yml) include this one and add the specific
+# backend plus the `core` / `grafana` bind-mounts that select which
+# plugin cfg and datasource are active.
+#
+# docker compose list-valued fields (a service's `volumes:`) are merged
+# by append when both the included and the including file define the
+# same service, which is how the per-backend files layer in their
+# backend-specific overlays without duplicating the common bits.
+
+name: prometheus-remote-writer-e2e
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER:     postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB:       postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout:  3s
+      retries:  20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  grafana:
+    image: grafana/grafana-oss:13.0.1
+    environment:
+      GF_SECURITY_ADMIN_USER:     admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_DEFAULT_THEME:     dark
+      GF_AUTH_ANONYMOUS_ENABLED:  "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      # Per-backend datasource file is appended by the including compose
+      # file (compose.<backend>.yml).
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health | grep -q '\"database\":\\s*\"ok\"'"]
+      interval: 5s
+      timeout:  3s
+      retries:  20
+
+  core:
+    image: opennms/horizon:latest
+    command: ["-s"]
+    # Karaf's orderly bundle shutdown routinely hits the full default
+    # 10s SIGTERM grace before SIGKILL. For this sandbox the data in
+    # core is throwaway (volumes are removed with `down -v`), so cut
+    # the wait short.
+    stop_grace_period: 2s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST:     postgres
+      POSTGRES_PORT:     "5432"
+      POSTGRES_USER:     postgres
+      POSTGRES_PASSWORD: postgres
+      OPENNMS_DBNAME:    opennms
+      OPENNMS_DBUSER:    opennms
+      OPENNMS_DBPASS:    opennms
+      JAVA_OPTS: "-Xmx2g -XX:MaxMetaspaceSize=1g"
+    ports:
+      - "8980:8980"   # Web UI / REST
+      - "8101:8101"   # Karaf SSH shell (admin/admin by default)
+    volumes:
+      - ./opennms/opennms.properties.d:/opt/opennms-etc-overlay/opennms.properties.d:ro
+      - ../assembly/kar/target:/opt/opennms/deploy:ro
+      - opennms-data:/opennms-data
+      # Per-backend plugin cfg is appended by the including compose
+      # file (compose.<backend>.yml).
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:8980/opennms/login.jsp"]
+      interval: 10s
+      timeout:  5s
+      retries:  60   # first boot can take several minutes
+      start_period: 30s
+
+volumes:
+  postgres-data:
+  opennms-data:
+  grafana-data:

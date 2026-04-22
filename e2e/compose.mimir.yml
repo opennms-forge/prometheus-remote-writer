@@ -1,0 +1,60 @@
+# E2E sandbox — Grafana Mimir backend (single-binary).
+#
+# Usage:
+#   make -C .. kar                             # build the KAR once
+#   docker compose -f compose.mimir.yml up -d
+#   docker compose -f compose.mimir.yml down -v
+#
+# UI endpoints:
+#   http://localhost:8980   OpenNMS (admin/admin)
+#   http://localhost:3000   Grafana (admin/admin, or anonymous Viewer)
+#   http://localhost:9009   Mimir
+#
+# See compose.prometheus.yml for the `extends:` rationale.
+
+name: prometheus-remote-writer-e2e
+
+services:
+
+  postgres:
+    extends:
+      file: compose.base.yml
+      service: postgres
+
+  core:
+    extends:
+      file: compose.base.yml
+      service: core
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./opennms/mimir.cfg:/opt/opennms-etc-overlay/org.opennms.plugins.tss.prometheusremotewriter.cfg:ro
+
+  grafana:
+    extends:
+      file: compose.base.yml
+      service: grafana
+    volumes:
+      - ./grafana/datasources/mimir.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
+
+  mimir:
+    image: grafana/mimir:2.14.0
+    command:
+      - "-config.file=/etc/mimir/mimir.yaml"
+    ports:
+      - "9009:9009"
+    volumes:
+      - ./mimir/mimir.yaml:/etc/mimir/mimir.yaml:ro
+      - mimir-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9009/ready"]
+      interval: 5s
+      timeout:  3s
+      retries:  30
+
+volumes:
+  postgres-data:
+  opennms-data:
+  grafana-data:
+  mimir-data:

@@ -1,0 +1,15 @@
+apiVersion: 1
+
+# Datasource mounted into Grafana by compose.prometheus.yml.
+# The plugin writes here via remote-write; Grafana reads back via PromQL.
+datasources:
+  - name: OpenNMS (Prometheus)
+    type: prometheus
+    uid: onms-prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true
+    jsonData:
+      timeInterval: 30s
+      httpMethod: POST
