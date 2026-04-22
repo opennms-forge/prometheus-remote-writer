@@ -35,6 +35,14 @@ public class PrometheusRemoteWriterConfig {
     private String writeUrl;
     private String readUrl;
 
+    // --- Source identity ---
+    /** Operator-supplied identifier for this OpenNMS instance. When non-empty,
+     *  every outbound sample carries an {@code onms_instance_id} label with
+     *  this value so operators running multiple OpenNMS instances against a
+     *  shared Prometheus-compatible backend can disambiguate samples in
+     *  PromQL. Orthogonal to {@link #tenantOrgId}; see README. */
+    private String instanceId;
+
     // --- Auth ---
     private String basicUsername;
     private String basicPassword;
@@ -183,6 +191,7 @@ public class PrometheusRemoteWriterConfig {
         List<String> out = new ArrayList<>();
         diffStr(out, "write.url",                 other.writeUrl,              writeUrl);
         diffStr(out, "read.url",                  other.readUrl,               readUrl);
+        diffStr(out, "instance.id",               other.instanceId,            instanceId);
         diffStr(out, "auth.basic.username",       other.basicUsername,         basicUsername);
         diffMasked(out, "auth.basic.password",    other.basicPassword,         basicPassword);
         diffMasked(out, "auth.bearer.token",      other.bearerToken,           bearerToken);
@@ -217,6 +226,7 @@ public class PrometheusRemoteWriterConfig {
 
     public void setWriteUrl(String v)              { writeUrl = blankToNull(v); }
     public void setReadUrl(String v)               { readUrl = blankToNull(v); }
+    public void setInstanceId(String v)            { instanceId = blankToNull(v); }
     public void setBasicUsername(String v)         { basicUsername = blankToNull(v); }
     public void setBasicPassword(String v)         { basicPassword = blankToNull(v); }
     public void setBearerToken(String v)           { bearerToken = blankToNull(v); }
@@ -275,6 +285,7 @@ public class PrometheusRemoteWriterConfig {
 
     public String  getWriteUrl()              { return writeUrl; }
     public String  getReadUrl()               { return readUrl; }
+    public String  getInstanceId()            { return instanceId; }
     public String  getBasicUsername()         { return basicUsername; }
     public String  getBasicPassword()         { return basicPassword; }
     public String  getBearerToken()           { return bearerToken; }

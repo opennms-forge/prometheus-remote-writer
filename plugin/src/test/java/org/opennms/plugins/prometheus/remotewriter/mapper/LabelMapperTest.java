@@ -152,6 +152,64 @@ class LabelMapperTest {
         assertThat(out.value()).isEqualTo(3.14);
     }
 
+    // ---------- onms_instance_id --------------------------------------------
+
+    @Test
+    void onms_instance_id_is_emitted_when_instance_id_is_set() {
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setInstanceId("opennms-us-east");
+        MappedSample out = new LabelMapper(c).map(interfaceSample());
+        assertThat(out.labels()).containsEntry("onms_instance_id", "opennms-us-east");
+    }
+
+    @Test
+    void onms_instance_id_is_absent_when_instance_id_is_unset() {
+        // The default fixture config doesn't set instance.id.
+        MappedSample out = DEFAULT_MAPPER.map(interfaceSample());
+        assertThat(out.labels()).doesNotContainKey("onms_instance_id");
+        // Other defaults still emitted.
+        assertThat(out.labels()).containsKey("__name__");
+        assertThat(out.labels()).containsKey("node");
+    }
+
+    @Test
+    void onms_instance_id_is_absent_when_instance_id_is_whitespace() {
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setInstanceId("   ");
+        MappedSample out = new LabelMapper(c).map(interfaceSample());
+        assertThat(out.labels()).doesNotContainKey("onms_instance_id");
+    }
+
+    @Test
+    void onms_instance_id_honors_labels_exclude() {
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setInstanceId("opennms-us-east");
+        c.setLabelsExclude("onms_instance_id");
+        MappedSample out = new LabelMapper(c).map(interfaceSample());
+        assertThat(out.labels()).doesNotContainKey("onms_instance_id");
+    }
+
+    @Test
+    void onms_instance_id_honors_labels_rename() {
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setInstanceId("opennms-us-east");
+        c.setLabelsRename("onms_instance_id -> cluster");
+        MappedSample out = new LabelMapper(c).map(interfaceSample());
+        assertThat(out.labels()).containsEntry("cluster", "opennms-us-east");
+        assertThat(out.labels()).doesNotContainKey("onms_instance_id");
+    }
+
+    @Test
+    void onms_instance_id_value_is_sanitized_to_label_value_rules() {
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        // Sanitizer.labelValue truncates values exceeding 2048 bytes;
+        // we just assert the label is emitted with the literal value
+        // for typical operator-supplied identifiers.
+        c.setInstanceId("opennms-us-east-1");
+        MappedSample out = new LabelMapper(c).map(interfaceSample());
+        assertThat(out.labels()).containsEntry("onms_instance_id", "opennms-us-east-1");
+    }
+
     // ---------- override globs ----------------------------------------------
 
     @Test

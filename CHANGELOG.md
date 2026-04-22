@@ -7,6 +7,30 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`instance.id` config and `onms_instance_id` label** — stamps every
+  outbound sample with an operator-supplied identifier so multiple OpenNMS
+  instances writing into the same Prometheus-compatible backend can be
+  distinguished and aggregated in PromQL. Works against every
+  Prometheus-compatible backend (Prometheus, Mimir, Cortex,
+  VictoriaMetrics, Thanos). Orthogonal to `tenant.org-id` (backend tenant
+  isolation); use either, both, or neither depending on deployment shape.
+  See the new README section "Identifying samples from multiple OpenNMS
+  instances" for the decision table.
+- **Startup WARN when `instance.id` is unset** — one-shot, informational.
+  Fires once per bundle lifecycle; not repeated by hot-reload cycles.
+  Single-instance deployments can ignore or silence by setting the knob.
+
+### Upgrade notes
+
+- Purely additive. Deployments that do not set `instance.id` emit
+  identical labels to v0.1 and gain exactly one new `WARN` line on
+  startup.
+- Deployments already using `tenant.org-id` alone continue to work
+  unchanged; setting `instance.id` is an additive migration that unlocks
+  cross-instance PromQL without disturbing tenant isolation.
+
 ## [0.1.0] — 2026-04-22
 
 First release. Implements the OpenNMS `TimeSeriesStorage` SPI against any

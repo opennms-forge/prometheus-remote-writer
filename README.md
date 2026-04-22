@@ -51,6 +51,7 @@ corresponding source data is available:
 
 | Label | Source | Notes |
 |---|---|---|
+| `onms_instance_id` | config `instance.id` | Only emitted when `instance.id` is set. See "Identifying samples from multiple OpenNMS instances". |
 | `__name__` | intrinsic `name` | Sanitized to Prom's metric-name grammar. |
 | `resourceId` | intrinsic `resourceId` | Raw, lossless. |
 | `node` | derived | `"<foreignSource>:<foreignId>"` when both are set; numeric dbId otherwise. |
@@ -68,6 +69,66 @@ corresponding source data is available:
 **Deliberately excluded by default** — available via `labels.include` if you want
 them: `if_alias` (user-editable, churns), `sys_descr`, `sys_object_id`, asset
 record fields, OpenNMS metadata (see below).
+
+## Identifying samples from multiple OpenNMS instances
+
+Running more than one OpenNMS instance against the same Prometheus-compatible
+backend? Two independent knobs exist, and they solve different problems:
+
+| Knob | Header / label | What it does | Works with |
+|---|---|---|---|
+| `instance.id` | label `onms_instance_id` | Stamps every sample with a stable per-instance identifier. PromQL can filter (`{onms_instance_id="…"}`) or aggregate (`sum by (onms_instance_id) (…)`) across all instances in the shared backend. | Every Prometheus-compatible backend. |
+| `tenant.org-id` | header `X-Scope-OrgID` | Partitions storage at the backend tier — each tenant's data is isolated, queried separately. Matches the `opennms-cortex-tss-plugin` `organizationId` behavior. | Grafana Mimir, Cortex, VictoriaMetrics cluster, Thanos Receive. **No-op** against plain Prometheus and single-tenant VictoriaMetrics. |
+
+### When to use which
+
+| Deployment | `instance.id` | `tenant.org-id` |
+|---|---|---|
+| Single OpenNMS → dedicated backend | not required | not required |
+| Multiple OpenNMS → shared Prometheus / single-tenant VM | **required** | n/a (no-op) |
+| Multiple OpenNMS → Mimir / Cortex / VM cluster, fleet-wide queries | **required** | optional |
+| Multiple OpenNMS → Mimir / Cortex / VM cluster, strict per-instance isolation | optional | **required** |
+
+If you want both fleet-wide PromQL *and* backend-enforced isolation, set both.
+
+### Example
+
+Two OpenNMS instances writing to the same Mimir cluster:
+
+```properties
+# opennms.properties.d on instance #1
+instance.id    = opennms-us-east
+tenant.org-id  = fleet-prod
+
+# opennms.properties.d on instance #2
+instance.id    = opennms-us-west
+tenant.org-id  = fleet-prod
+```
+
+PromQL:
+
+```
+# All nodes, either OpenNMS
+up{job="opennms"}
+
+# Per-OpenNMS rollup
+sum by (onms_instance_id) (rate(ifHCInOctets[5m]))
+
+# Just the west instance
+ifHCInOctets{onms_instance_id="opennms-us-west"}
+```
+
+### Notes
+
+- `onms_instance_id` is honored by `labels.rename` and `labels.exclude` on the
+  same terms as any other default label. If you prefer `cluster` or `tenant` or
+  `fleet` as the label name, rename it.
+- When `instance.id` is unset, the plugin logs **one** `WARN` at startup
+  pointing at the knob. This is informational — single-instance deployments
+  can ignore or silence it by setting the value.
+- The plugin cannot detect cross-process uniqueness of `instance.id`. If two
+  OpenNMS instances configure the same value, their samples collide again.
+  Pick stable, unique identifiers.
 
 ## OpenNMS metadata — opt-in only
 

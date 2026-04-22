@@ -14,6 +14,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -57,6 +58,13 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
     /** Previous active config, used only for hot-reload diff logging. */
     private static final AtomicReference<PrometheusRemoteWriterConfig> LAST_ACTIVE =
             new AtomicReference<>();
+
+    /**
+     * One-shot gate for the instance.id-unset WARN. Static so the warning
+     * fires once per bundle lifecycle regardless of how many times the
+     * blueprint container reloads the plugin on config changes.
+     */
+    private static final AtomicBoolean INSTANCE_ID_UNSET_WARNED = new AtomicBoolean(false);
 
     /**
      * Everything constructed at {@link #start()} time. Published as a unit via
@@ -114,6 +122,8 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
                     bad.getMessage());
             return;
         }
+
+        warnIfInstanceIdUnset();
 
         PluginMetrics         m  = null;
         LabelMapper           lm = null;
@@ -255,6 +265,33 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
     public long getDeleteNoopTotal() { return deleteNoopTotal.get(); }
 
     // --- internals ---------------------------------------------------------
+
+    private void warnIfInstanceIdUnset() {
+        String iid = config.getInstanceId();
+        if ((iid == null || iid.isEmpty())
+                && INSTANCE_ID_UNSET_WARNED.compareAndSet(false, true)) {
+            LOG.warn("instance.id is not set. This is fine for a single OpenNMS "
+                   + "instance writing to a dedicated backend. If you run multiple "
+                   + "OpenNMS instances against a shared Prometheus-compatible "
+                   + "backend, set instance.id to a stable per-instance identifier "
+                   + "so samples can be distinguished by the onms_instance_id label.");
+        }
+    }
+
+    /** Visible for tests — resets the one-shot WARN gate so a sequence of
+     *  start()/stop() cycles within a single test run can exercise the WARN
+     *  deterministically. */
+    static void resetInstanceIdWarnedForTesting() {
+        INSTANCE_ID_UNSET_WARNED.set(false);
+    }
+
+    /** Visible for tests — true once the WARN gate has flipped (i.e. the
+     *  LOG.warn in {@link #warnIfInstanceIdUnset()} has been emitted once
+     *  already within this JVM). Lets tests assert the one-shot semantic
+     *  without taking a dependency on a log-capture framework. */
+    static boolean isInstanceIdWarnedForTesting() {
+        return INSTANCE_ID_UNSET_WARNED.get();
+    }
 
     private void logActivationOrDiff() {
         PrometheusRemoteWriterConfig previous = LAST_ACTIVE.getAndSet(config);

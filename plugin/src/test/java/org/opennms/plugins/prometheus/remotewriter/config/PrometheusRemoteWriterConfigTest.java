@@ -54,6 +54,42 @@ class PrometheusRemoteWriterConfigTest {
         assertThat(c.getMetricPrefix()).isNull();
     }
 
+    // ---------- instance.id -------------------------------------------------
+
+    @Test
+    void instance_id_is_parsed_and_normalised() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setInstanceId("opennms-us-east");
+        assertThat(c.getInstanceId()).isEqualTo("opennms-us-east");
+    }
+
+    @Test
+    void instance_id_whitespace_normalises_to_null() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setInstanceId("   ");
+        assertThat(c.getInstanceId()).isNull();
+        c.setInstanceId("");
+        assertThat(c.getInstanceId()).isNull();
+        c.setInstanceId(null);
+        assertThat(c.getInstanceId()).isNull();
+    }
+
+    @Test
+    void instance_id_is_trimmed() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setInstanceId("  opennms-us-east  ");
+        assertThat(c.getInstanceId()).isEqualTo("opennms-us-east");
+    }
+
+    @Test
+    void instance_id_is_reported_in_diff() {
+        PrometheusRemoteWriterConfig before = minimal();
+        PrometheusRemoteWriterConfig after  = minimal();
+        after.setInstanceId("opennms-us-east");
+        assertThat(after.diff(before))
+            .anyMatch(l -> l.startsWith("instance.id: (unset) -> \"opennms-us-east\""));
+    }
+
     // ---------- required endpoints ------------------------------------------
 
     @Test
