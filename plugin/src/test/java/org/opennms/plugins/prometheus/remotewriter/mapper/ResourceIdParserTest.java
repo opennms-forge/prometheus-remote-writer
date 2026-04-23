@@ -63,4 +63,85 @@ class ResourceIdParserTest {
     void returns_null_for_random_string() {
         assertThat(ResourceIdParser.tryParse("not a resource id")).isNull();
     }
+
+    // ---------- slash-FS grammar --------------------------------------------
+
+    @Test
+    void parses_slash_fs_with_single_segment_instance() {
+        ResourceIdParser.Parsed p = ResourceIdParser.tryParse(
+                "snmp/fs/selfmonitor/1/opennms-jvm/OpenNMS_Name_Notifd");
+        assertThat(p).isNotNull();
+        assertThat(p.nodeId()).isEqualTo("selfmonitor:1");
+        assertThat(p.resourceType()).isEqualTo("opennms-jvm");
+        assertThat(p.resourceInstance()).isEqualTo("OpenNMS_Name_Notifd");
+    }
+
+    @Test
+    void parses_slash_fs_with_dotted_instance() {
+        ResourceIdParser.Parsed p = ResourceIdParser.tryParse(
+                "snmp/fs/selfmonitor/1/jmx-minion/java.lang_type_Memory");
+        assertThat(p).isNotNull();
+        assertThat(p.nodeId()).isEqualTo("selfmonitor:1");
+        assertThat(p.resourceType()).isEqualTo("jmx-minion");
+        assertThat(p.resourceInstance()).isEqualTo("java.lang_type_Memory");
+    }
+
+    @Test
+    void parses_slash_fs_with_multi_segment_instance_preserved() {
+        ResourceIdParser.Parsed p = ResourceIdParser.tryParse(
+                "snmp/fs/selfmonitor/1/group/a/b/c");
+        assertThat(p).isNotNull();
+        assertThat(p.nodeId()).isEqualTo("selfmonitor:1");
+        assertThat(p.resourceType()).isEqualTo("group");
+        // Instance captures everything after the group segment, preserving slashes.
+        assertThat(p.resourceInstance()).isEqualTo("a/b/c");
+    }
+
+    // ---------- slash-DB grammar --------------------------------------------
+
+    @Test
+    void parses_slash_db_with_numeric_node_id() {
+        ResourceIdParser.Parsed p = ResourceIdParser.tryParse("snmp/42/hrStorageIndex/1");
+        assertThat(p).isNotNull();
+        assertThat(p.nodeId()).isEqualTo("42");
+        assertThat(p.resourceType()).isEqualTo("hrStorageIndex");
+        assertThat(p.resourceInstance()).isEqualTo("1");
+    }
+
+    @Test
+    void parses_slash_db_with_multi_segment_instance() {
+        ResourceIdParser.Parsed p = ResourceIdParser.tryParse("snmp/42/group/a/b/c");
+        assertThat(p).isNotNull();
+        assertThat(p.nodeId()).isEqualTo("42");
+        assertThat(p.resourceType()).isEqualTo("group");
+        assertThat(p.resourceInstance()).isEqualTo("a/b/c");
+    }
+
+    // ---------- slash-path fall-through -------------------------------------
+
+    @Test
+    void slash_db_non_numeric_first_segment_falls_through() {
+        // `nonsense` is not numeric, so SLASH_DB does not match; no other grammar
+        // accepts this shape either.
+        assertThat(ResourceIdParser.tryParse("snmp/nonsense/x/y")).isNull();
+    }
+
+    @Test
+    void slash_fs_missing_segments_return_null() {
+        assertThat(ResourceIdParser.tryParse("snmp/fs/onlyfs")).isNull();
+        assertThat(ResourceIdParser.tryParse("snmp/fs/onlyfs/onlyfid")).isNull();
+        assertThat(ResourceIdParser.tryParse("snmp/fs/onlyfs/onlyfid/onlygroup")).isNull();
+    }
+
+    @Test
+    void slash_db_missing_segments_return_null() {
+        assertThat(ResourceIdParser.tryParse("snmp/42")).isNull();
+        assertThat(ResourceIdParser.tryParse("snmp/42/onlygroup")).isNull();
+    }
+
+    @Test
+    void snmp_alone_returns_null() {
+        assertThat(ResourceIdParser.tryParse("snmp/")).isNull();
+        assertThat(ResourceIdParser.tryParse("snmp")).isNull();
+    }
 }
