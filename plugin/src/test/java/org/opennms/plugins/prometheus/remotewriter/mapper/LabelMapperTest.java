@@ -388,6 +388,58 @@ class LabelMapperTest {
         assertThat(out.labels()).doesNotContainKey("foreign_source");
     }
 
+    // ---------- node-label precedence (slash-path) --------------------------
+
+    @Test
+    void slash_fs_resource_id_alone_emits_node_and_parsed_components() {
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "jvm_memory_used_bytes")
+                .intrinsicTag("resourceId", "snmp/fs/selfmonitor/1/jmx-minion/java.lang_type_Memory"));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels()).containsEntry("node", "selfmonitor:1");
+        assertThat(out.labels()).containsEntry("resource_type", "jmx-minion");
+        assertThat(out.labels()).containsEntry("resource_instance", "java.lang_type_Memory");
+    }
+
+    @Test
+    void external_fs_tags_win_over_parsed_slash_fs_resource_id() {
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "jvm_metric")
+                .intrinsicTag("resourceId", "snmp/fs/other-fs/other-fid/jmx-minion/OpenNMS_Name_Notifd")
+                .externalTag("foreignSource", "real-fs")
+                .externalTag("foreignId", "real-fid"));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels()).containsEntry("node", "real-fs:real-fid");
+        // Parsed resource components still come from the resourceId.
+        assertThat(out.labels()).containsEntry("resource_type", "jmx-minion");
+        assertThat(out.labels()).containsEntry("resource_instance", "OpenNMS_Name_Notifd");
+    }
+
+    @Test
+    void parsed_slash_fs_wins_over_nonexistent_slash_db_context() {
+        // Sample has only a slash-FS resourceId, no external FS tags, no nodeId.
+        // Precedence: parsed slash-FS provides `node=<fs>:<fid>`, not falling
+        // through to external `nodeId` (which isn't present either).
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "foo")
+                .intrinsicTag("resourceId", "snmp/fs/selfmonitor/1/grp/inst"));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels()).containsEntry("node", "selfmonitor:1");
+    }
+
+    @Test
+    void parsed_slash_db_wins_over_external_node_id_tag() {
+        // Slash-DB resourceId and an unrelated external nodeId — parser wins
+        // because the resourceId is the authoritative identity source when
+        // FS tags are absent.
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "foo")
+                .intrinsicTag("resourceId", "snmp/42/grp/inst")
+                .externalTag("nodeId", "99"));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels()).containsEntry("node", "42");
+    }
+
     // ---------- drift guard -------------------------------------------------
 
     @Test
