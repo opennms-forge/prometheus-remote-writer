@@ -508,6 +508,61 @@ class LabelMapperTest {
     }
 
     @Test
+    void copy_input_map_is_read_only_during_stage() {
+        // The hardest test of the one-pass-reads-from-input invariant: the
+        // second copy directive's source is a label that was CLOBBERED by the
+        // first directive's target. If applyCopy were reading from its own
+        // `out` map (the naive chained-copy), the second directive would see
+        // the clobbered value. Reading from the input `labels` map, it sees
+        // the original include-surfaced value.
+        //
+        // Test setup depends on `sourceX` NOT being consumed by the default
+        // allowlist — so the pre-assertion below confirms the include pass
+        // actually surfaces `source_x` before we layer copy on top. If a
+        // future commit adds `sourceX` to buildDefaults' consumed-keys set,
+        // this test fails here rather than silently passing for the wrong
+        // reason below.
+
+        // ---- Pre-assert: include-only baseline ----
+        PrometheusRemoteWriterConfig baselineCfg = defaultConfig();
+        baselineCfg.setLabelsInclude("sourceX");
+        Sample s = interfaceSampleWith("sourceX", "include-value");
+        MappedSample baseline = new LabelMapper(baselineCfg).map(s);
+        assertThat(baseline.labels())
+                .as("`sourceX` must not be consumed by defaults; include must surface `source_x`")
+                .containsEntry("source_x", "include-value");
+
+        // ---- Main scenario ----
+        // Config: labels.include surfaces source tag `sourceX` as label
+        // `source_x="include-value"`. labels.copy then runs two directives:
+        //   1. node -> source_x (clobbers the include-surfaced label)
+        //   2. source_x -> new_target (must see the ORIGINAL include-value,
+        //      not the clobbered node value)
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setLabelsInclude("sourceX");
+        c.setLabelsCopy("node -> source_x, source_x -> new_target");
+        LabelMapper mapper = new LabelMapper(c);
+
+        MappedSample out = mapper.map(s);
+
+        // First directive: source_x is the clobber target and ends up with
+        // node's value (the documented clobber behavior).
+        assertThat(out.labels()).containsEntry("source_x", "NOC:router-42");
+        // Second directive: source_x as source reads from the ORIGINAL
+        // labels map, not from the partial `out` — so new_target holds
+        // the include-surfaced value. This is the primary invariant under
+        // test.
+        assertThat(out.labels()).containsEntry("new_target", "include-value");
+        // Node is still present (not renamed).
+        assertThat(out.labels()).containsEntry("node", "NOC:router-42");
+        // Clobber WARN behavior (secondary, but worth pinning alongside):
+        // `source_x` was clobbered by the first directive; WARN fires
+        // exactly once for it. Other warns (e.g. unknown sources) stay clear.
+        assertThat(mapper.warnedCopyTargetClobbersForTesting()).contains("source_x");
+        assertThat(mapper.warnedUnknownCopySourcesForTesting()).isEmpty();
+    }
+
+    @Test
     void copy_source_with_empty_value_is_treated_as_absent() {
         // An include-surfaced source tag with an empty value would, without
         // this guard, be copied as-is — and Prometheus treats empty-valued

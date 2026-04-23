@@ -7,6 +7,15 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Internal**: `PrometheusRemoteWriterConfig.labelsRenameMap()` and `labelsCopyMap()` now cache their parsed result, returning the same `Map` instance across repeated calls within one config-string lifecycle. Setters invalidate. `validate()` no longer re-parses the same string three times per invocation. The returned maps continue to be unmodifiable (as before); the behavior change is strictly tighter — same content, stable identity.
+
+### Tests
+
+- Pinned the `instance.id` WARN-suppression emission count — a refactor that kept the one-shot gate correct but moved `LOG.warn` outside the CAS-success branch would have passed the existing boolean-gate assertions and silently re-fired on every bundle activation. New counter + `getInstanceIdWarnCountForTesting()` accessor + three scenarios (first start, silent re-start, hot-reload with instance.id flipped on).
+- Pinned the harder one-pass invariant of `labels.copy`: the stage reads source values from its input map, not from the accumulating output, so a chained directive whose source was just clobbered by an earlier directive still sees the ORIGINAL value.
+
 ## [0.3.0] — TBD
 
 ### Added
