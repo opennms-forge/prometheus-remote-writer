@@ -389,6 +389,94 @@ class LabelMapperTest {
         assertThat(out.labels()).doesNotContainKey("foreign_source");
     }
 
+    // ---------- labels.copy --------------------------------------------------
+
+    @Test
+    void copy_emits_source_under_additional_name() {
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setLabelsCopy("node -> instance");
+        MappedSample out = new LabelMapper(c).map(interfaceSample());
+        assertThat(out.labels()).containsEntry("node", "NOC:router-42");
+        assertThat(out.labels()).containsEntry("instance", "NOC:router-42");
+    }
+
+    @Test
+    void copy_multiple_targets_from_same_source_emits_all() {
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setLabelsCopy("node -> instance, node -> host");
+        MappedSample out = new LabelMapper(c).map(interfaceSample());
+        assertThat(out.labels()).containsEntry("node", "NOC:router-42");
+        assertThat(out.labels()).containsEntry("instance", "NOC:router-42");
+        assertThat(out.labels()).containsEntry("host", "NOC:router-42");
+    }
+
+    @Test
+    void copy_is_one_pass_and_does_not_chain() {
+        // `copy = node -> a, a -> b` must NOT produce `b` — the second
+        // directive's source `a` did not exist at copy-stage entry.
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setLabelsCopy("node -> a, a -> b");
+        MappedSample out = new LabelMapper(c).map(interfaceSample());
+        assertThat(out.labels()).containsEntry("node", "NOC:router-42");
+        assertThat(out.labels()).containsEntry("a", "NOC:router-42");
+        assertThat(out.labels()).doesNotContainKey("b");
+    }
+
+    @Test
+    void copy_composes_with_rename_on_same_source() {
+        // `copy = node -> instance, rename = node -> host` — copy runs first
+        // on pre-rename `node`, then rename moves `node` to `host`. Final:
+        // `host` (from rename) + `instance` (from copy), no `node`.
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setLabelsCopy("node -> instance");
+        c.setLabelsRename("node -> host");
+        MappedSample out = new LabelMapper(c).map(interfaceSample());
+        assertThat(out.labels()).containsEntry("host", "NOC:router-42");
+        assertThat(out.labels()).containsEntry("instance", "NOC:router-42");
+        assertThat(out.labels()).doesNotContainKey("node");
+    }
+
+    @Test
+    void copy_sees_labels_surfaced_by_include() {
+        // `include = ifAlias` creates `if_alias`; copy = if_alias -> port_description
+        // must then produce both.
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setLabelsInclude("ifAlias");
+        c.setLabelsCopy("if_alias -> port_description");
+        Sample s = interfaceSampleWith("ifAlias", "uplink-to-core");
+        MappedSample out = new LabelMapper(c).map(s);
+        assertThat(out.labels()).containsEntry("if_alias", "uplink-to-core");
+        assertThat(out.labels()).containsEntry("port_description", "uplink-to-core");
+    }
+
+    @Test
+    void copy_does_not_resurrect_excluded_label() {
+        // `exclude = node, copy = node -> instance`: node is gone before copy
+        // runs, so `instance` is not created either.
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setLabelsExclude("node");
+        c.setLabelsCopy("node -> instance");
+        MappedSample out = new LabelMapper(c).map(interfaceSample());
+        assertThat(out.labels()).doesNotContainKey("node");
+        assertThat(out.labels()).doesNotContainKey("instance");
+    }
+
+    @Test
+    void copy_unknown_source_is_noop_and_warns_once() {
+        // `copy = nonexistent -> fooo` — source never appears. Must not fail,
+        // must not emit `fooo`. Subsequent map() calls do not re-warn.
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setLabelsCopy("nonexistent -> fooo");
+        LabelMapper mapper = new LabelMapper(c);
+
+        MappedSample out1 = mapper.map(interfaceSample());
+        assertThat(out1.labels()).doesNotContainKey("fooo");
+
+        // Second call must also not throw and must produce no `fooo`.
+        MappedSample out2 = mapper.map(interfaceSample());
+        assertThat(out2.labels()).doesNotContainKey("fooo");
+    }
+
     // ---------- node-label precedence (slash-path) --------------------------
 
     @Test

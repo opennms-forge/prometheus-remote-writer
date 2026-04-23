@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 
 import org.opennms.integration.api.v1.timeseries.IntrinsicTagNames;
@@ -25,6 +26,8 @@ import org.opennms.integration.api.v1.timeseries.Tag;
 import org.opennms.plugins.prometheus.remotewriter.config.PrometheusRemoteWriterConfig;
 import org.opennms.plugins.prometheus.remotewriter.sanitize.Sanitizer;
 import org.opennms.plugins.prometheus.remotewriter.wire.MappedSample;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Turns an OpenNMS {@link Sample} into a {@link MappedSample} with the
@@ -93,18 +96,27 @@ public final class LabelMapper {
             "onms_cat_",
             "onms_meta_");
 
+    private static final Logger LOG = LoggerFactory.getLogger(LabelMapper.class);
+
     private final List<Pattern> excludeGlobs;
     private final List<Pattern> includeGlobs;
     private final Map<String, String> renameMap;
+    private final Map<String, List<String>> copyMap;
     private final String metricPrefix;
     private final String instanceId;
     private final MetadataProcessor metadataProcessor;
+    /** One-shot WARN gate for unknown labels.copy sources. Entry is added the
+     *  first time a source is observed missing at copy time; subsequent
+     *  occurrences on the same source are silent. Set-per-instance matches
+     *  the bundle-lifecycle scope described in the README. */
+    private final Set<String> warnedUnknownCopySources = ConcurrentHashMap.newKeySet();
 
     public LabelMapper(PrometheusRemoteWriterConfig config) {
         Objects.requireNonNull(config, "config");
         this.excludeGlobs      = compileGlobs(config.labelsExcludeGlobs());
         this.includeGlobs      = compileGlobs(config.labelsIncludeGlobs());
         this.renameMap         = config.labelsRenameMap();
+        this.copyMap           = config.labelsCopyMap();
         this.metricPrefix      = config.getMetricPrefix();
         this.instanceId        = config.getInstanceId();
         this.metadataProcessor = new MetadataProcessor(config);
@@ -139,6 +151,7 @@ public final class LabelMapper {
         Map<String, String> labels = new LinkedHashMap<>(defaults.labels());
         labels = applyExclude(labels, excludeGlobs);
         labels = applyInclude(labels, sourceTags, includeGlobs, defaults.consumedSourceKeys());
+        labels = applyCopy(labels, copyMap, warnedUnknownCopySources);
         labels = applyRename(labels, renameMap);
         // Metadata passthrough runs last so its prefix-namespaced labels are
         // not renamed or excluded by labels.* rules; the default allowlist
@@ -295,6 +308,46 @@ public final class LabelMapper {
                 name = Sanitizer.labelName(renamed);
             }
             out.put(name, e.getValue());
+        }
+        return out;
+    }
+
+    /**
+     * Emit a copy of each listed source label under an additional name. Runs
+     * after include, before rename; sees pre-rename label names. One-pass
+     * semantics: source values are read once from {@code labels} at entry, so
+     * a chain like {@code copy = node -> a, a -> b} does NOT produce {@code b}
+     * — at entry time {@code a} didn't exist yet.
+     *
+     * <p>Unknown sources (source label absent at copy time) are logged exactly
+     * once per {@code warnedSources} instance via {@link #LOG}{@code .warn} and
+     * then silently ignored per sample.
+     */
+    private static Map<String, String> applyCopy(Map<String, String> labels,
+                                                 Map<String, List<String>> copyMap,
+                                                 Set<String> warnedSources) {
+        if (copyMap.isEmpty()) return labels;
+        // Snapshot source values once — one-pass semantics.
+        Map<String, String> snapshot = new LinkedHashMap<>(copyMap.size());
+        for (String from : copyMap.keySet()) {
+            String v = labels.get(from);
+            if (v == null) {
+                if (warnedSources.add(from)) {
+                    LOG.warn("labels.copy source '{}' not found at copy time; "
+                            + "directive is a no-op for samples without that label", from);
+                }
+                continue;
+            }
+            snapshot.put(from, v);
+        }
+        if (snapshot.isEmpty()) return labels;
+        Map<String, String> out = new LinkedHashMap<>(labels);
+        for (Map.Entry<String, List<String>> e : copyMap.entrySet()) {
+            String value = snapshot.get(e.getKey());
+            if (value == null) continue;
+            for (String target : e.getValue()) {
+                out.put(Sanitizer.labelName(target), value);
+            }
         }
         return out;
     }
