@@ -84,11 +84,13 @@ OpenNMS metatags config ─▶ MATE interpolation ─▶ sample tags ─▶ plug
 
 OpenNMS's `MetaTagDataLoader` runs each configured value template through the
 MATE interpolator against the sample's scope and attaches a tag for every
-non-empty result. If you don't configure any
-`org.opennms.timeseries.tin.metatags.tag.*` properties, samples arrive at this
-plugin carrying only `name` and `resourceId` — and your Prometheus series will
-have bare `{resourceId="…"}` labels regardless of what this plugin is configured
-to emit.
+non-empty result. The property names below and the MATE scope syntax
+(`${node:…}`, `${interface:…}`, `${service:…}`, `${asset:…}`) are as of OpenNMS
+Horizon 35; upstream changes may rename properties in future Horizon releases.
+If you don't configure any `org.opennms.timeseries.tin.metatags.tag.*`
+properties, samples arrive at this plugin carrying only `name` and `resourceId`
+— and your Prometheus series will have bare `{resourceId="…"}` labels
+regardless of what this plugin is configured to emit.
 
 ### Minimal metatag config
 

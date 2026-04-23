@@ -42,10 +42,14 @@ public final class ResourceIdParser {
 
     /**
      * Matches {@code (node|nodeSource)[nodeId].resourceType[resourceInstance]}.
-     * The instance group is greedy to the terminating {@code ]} and may be empty.
+     * The resource-type segment is constrained to an identifier shape
+     * ({@code [a-zA-Z][a-zA-Z0-9_-]*}) so degenerate inputs like
+     * {@code node[1]..[x]} (which v0.1 accepted with {@code resourceType="."})
+     * fall through to raw-only emission. The instance group is greedy to the
+     * terminating {@code ]} and may be empty.
      */
     private static final Pattern BRACKETED = Pattern.compile(
-            "(?:node|nodeSource)\\[([^\\]]+)\\]\\.([^\\[]+)\\[([^\\]]*)\\]");
+            "(?:node|nodeSource)\\[([^\\]]+)\\]\\.([a-zA-Z][a-zA-Z0-9_-]*)\\[([^\\]]*)\\]");
 
     /**
      * Matches {@code snmp/fs/<foreignSource>/<foreignId>/<group>/<instance…>}.

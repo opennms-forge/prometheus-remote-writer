@@ -186,4 +186,19 @@ class ResourceIdParserTest {
         // deployment). 11+ digit inputs shouldn't quietly match.
         assertThat(ResourceIdParser.tryParse("snmp/12345678901/grp/inst")).isNull();
     }
+
+    // ---------- bracketed degenerate-type-segment rejection -----------------
+
+    @Test
+    void bracketed_rejects_dot_only_type_segment() {
+        // `node[1]..[x]` used to match with resourceType=".". The tightened
+        // grammar requires the type to be an identifier.
+        assertThat(ResourceIdParser.tryParse("node[1]..[x]")).isNull();
+    }
+
+    @Test
+    void bracketed_rejects_whitespace_type_segment() {
+        // `node[1]. [x]` — a single space for type is degenerate; reject.
+        assertThat(ResourceIdParser.tryParse("node[1]. [x]")).isNull();
+    }
 }
