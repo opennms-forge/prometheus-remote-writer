@@ -60,13 +60,21 @@ Migration table:
 | `name`           | `__name__`                 | Prometheus-native metric name.                                                                                        |
 | `resource_id`    | `resourceId`               | Raw OpenNMS resource identifier.                                                                                      |
 | `if_high_speed`  | `if_speed`                 | Normalized bits-per-second: `ifHighSpeed × 10⁶` when non-zero, else `ifSpeed`.                                        |
-| `node_id`        | `node`                     | FS-qualified identity when available, else the numeric dbId. Keep the old name via `labels.rename = node -> node_id`. |
+| `node_id`        | `node`                     | FS-qualified identity when available, else parsed from the `resourceId`, else the numeric dbId. To keep the `node_id` label name for existing dashboards, use `labels.rename = node -> node_id` — but note the *value* is now FS-qualified (`<fs>:<fid>`) when available, not the raw numeric dbId v0.1 emitted under `node_id`. Dashboards that assumed a purely numeric value must be updated. |
 | `categories`     | `onms_cat_<name>` per cat  | Per-category expansion, not a single comma-separated label.                                                           |
 
 The six other snake-cased source-key forms (`foreign_source`, `foreign_id`,
 `node_label`, `location`, `if_name`, `if_descr`) collided on label name with a
 default and were already single-valued in v0.1 via `putIfAbsent` — they are
 unchanged in v0.2.
+
+This also supersedes an undocumented v0.1 quirk where
+`labels.rename = foreign_source -> foreign_source_raw` combined with
+`labels.include = *` produced both `foreign_source_raw` (renamed default) and
+`foreign_source` (re-surfaced from the source tag). In v0.2 only
+`foreign_source_raw` is emitted — the source key is consumed and the include
+pass skips it. Operators who want the original value preserved under a
+different label name use `labels.rename` alone.
 
 Deployments running narrow `labels.include` patterns (e.g. `sys*, asset*`)
 are unaffected. Pre-upgrade, scan your dashboards and alert rules for the

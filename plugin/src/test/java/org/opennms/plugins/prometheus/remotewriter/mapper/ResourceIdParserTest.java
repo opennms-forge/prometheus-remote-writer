@@ -144,4 +144,46 @@ class ResourceIdParserTest {
         assertThat(ResourceIdParser.tryParse("snmp/")).isNull();
         assertThat(ResourceIdParser.tryParse("snmp")).isNull();
     }
+
+    // ---------- slash-path degenerate-segment rejection ---------------------
+
+    @Test
+    void slash_fs_rejects_whitespace_segments() {
+        // A single space in any of the first three path segments is an
+        // obvious degenerate shape; reject rather than emit node=" :1".
+        assertThat(ResourceIdParser.tryParse("snmp/fs/ /1/grp/inst")).isNull();
+        assertThat(ResourceIdParser.tryParse("snmp/fs/foo/ /grp/inst")).isNull();
+        assertThat(ResourceIdParser.tryParse("snmp/fs/foo/1/ /inst")).isNull();
+    }
+
+    @Test
+    void slash_fs_rejects_bracket_segments() {
+        // Brackets in non-instance segments usually indicate a caller that
+        // meant to emit the bracketed grammar; reject so we don't parse
+        // `snmp/fs/[foo]/1/grp/inst` into a surprising node identity.
+        assertThat(ResourceIdParser.tryParse("snmp/fs/[foo]/1/grp/inst")).isNull();
+        assertThat(ResourceIdParser.tryParse("snmp/fs/foo/[1]/grp/inst")).isNull();
+        assertThat(ResourceIdParser.tryParse("snmp/fs/foo/1/[grp]/inst")).isNull();
+    }
+
+    @Test
+    void slash_db_rejects_zero_node_id() {
+        // OpenNMS db nodeId sequence starts at 1; `snmp/0/…` is bogus.
+        assertThat(ResourceIdParser.tryParse("snmp/0/hrStorageIndex/1")).isNull();
+    }
+
+    @Test
+    void slash_db_rejects_leading_zero_node_id() {
+        // `snmp/00042/...` would produce node="00042" which fails equality
+        // against an externally-tagged nodeId="42"; reject.
+        assertThat(ResourceIdParser.tryParse("snmp/00042/hrStorageIndex/1")).isNull();
+        assertThat(ResourceIdParser.tryParse("snmp/042/hrStorageIndex/1")).isNull();
+    }
+
+    @Test
+    void slash_db_rejects_overlong_node_id() {
+        // Cap at 10 digits (10 billion — far beyond any realistic OpenNMS
+        // deployment). 11+ digit inputs shouldn't quietly match.
+        assertThat(ResourceIdParser.tryParse("snmp/12345678901/grp/inst")).isNull();
+    }
 }

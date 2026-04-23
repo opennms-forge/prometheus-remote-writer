@@ -132,7 +132,12 @@ public final class LabelMapper {
         }
 
         Defaults defaults = buildDefaults(metricName, sourceTags, instanceId);
-        Map<String, String> labels = applyExclude(defaults.labels(), excludeGlobs);
+        // Work on a fresh mutable copy; apply{Exclude,Include} may pass the
+        // map through unchanged when globs are empty, and metadataProcessor
+        // then mutates it — we do not want those mutations to leak back into
+        // the Defaults record, which is otherwise treated as a value object.
+        Map<String, String> labels = new LinkedHashMap<>(defaults.labels());
+        labels = applyExclude(labels, excludeGlobs);
         labels = applyInclude(labels, sourceTags, includeGlobs, defaults.consumedSourceKeys());
         labels = applyRename(labels, renameMap);
         // Metadata passthrough runs last so its prefix-namespaced labels are

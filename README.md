@@ -133,6 +133,8 @@ See
 for the full set of node, interface, service, asset, and category properties
 the sandbox uses — including SNMP agent info (`sysName`, `sysLocation`,
 `sysDescription`), the full asset-record surface, and interface hostnames.
+The `exposeCategories` line is at
+[`metatags.properties#L116`](e2e/opennms/opennms.properties.d/metatags.properties#L116).
 
 ### Caveat — the node record must exist in OpenNMS
 

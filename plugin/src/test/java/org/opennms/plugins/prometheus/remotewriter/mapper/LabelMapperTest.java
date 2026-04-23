@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.Map;
 
 import org.junit.jupiter.api.Test;
+import org.opennms.integration.api.v1.timeseries.IntrinsicTagNames;
 import org.opennms.integration.api.v1.timeseries.Sample;
 import org.opennms.integration.api.v1.timeseries.immutables.ImmutableMetric;
 import org.opennms.integration.api.v1.timeseries.immutables.ImmutableSample;
@@ -440,6 +441,20 @@ class LabelMapperTest {
         assertThat(out.labels()).containsEntry("node", "42");
     }
 
+    @Test
+    void node_uses_external_nodeId_when_no_fs_and_unparseable_resourceId() {
+        // True third-level fall-through: no FS tags, resourceId is unparseable
+        // (so `parsed == null`), external `nodeId` tag must win. Guards
+        // against a refactor that accidentally returns early when the parser
+        // misses.
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "foo")
+                .intrinsicTag("resourceId", "garbage-not-a-resource-id")
+                .externalTag("nodeId", "99"));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels()).containsEntry("node", "99");
+    }
+
     // ---------- drift guard -------------------------------------------------
 
     @Test
@@ -448,9 +463,14 @@ class LabelMapperTest {
         // reads, the returned consumedSourceKeys set must equal that set
         // exactly. Reviewers adding a new source-key read to buildDefaults
         // must update this test — that's the point.
+        //
+        // Use IntrinsicTagNames constants for the two intrinsic keys so that
+        // an upstream IAPI rename (e.g. `name` → `__name__`) would surface
+        // as a test failure rather than silently bypassing the consumed-keys
+        // dedup in production.
         Map<String, String> tags = new LinkedHashMap<>();
-        tags.put("name", "ifHCInOctets");
-        tags.put("resourceId", "nodeSource[NOC:router-42].interfaceSnmp[eth0]");
+        tags.put(IntrinsicTagNames.name, "ifHCInOctets");
+        tags.put(IntrinsicTagNames.resourceId, "nodeSource[NOC:router-42].interfaceSnmp[eth0]");
         tags.put("foreignSource", "NOC");
         tags.put("foreignId", "router-42");
         tags.put("nodeLabel", "router-42.example.com");
@@ -465,8 +485,8 @@ class LabelMapperTest {
         LabelMapper.Defaults defaults = LabelMapper.buildDefaults("ifHCInOctets", tags, null);
 
         assertThat(defaults.consumedSourceKeys()).containsExactlyInAnyOrder(
-                "name",
-                "resourceId",
+                IntrinsicTagNames.name,
+                IntrinsicTagNames.resourceId,
                 "foreignSource",
                 "foreignId",
                 "nodeLabel",
