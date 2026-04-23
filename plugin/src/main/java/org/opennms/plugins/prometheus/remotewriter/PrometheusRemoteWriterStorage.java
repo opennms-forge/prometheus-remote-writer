@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -65,6 +66,16 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
      * blueprint container reloads the plugin on config changes.
      */
     private static final AtomicBoolean INSTANCE_ID_UNSET_WARNED = new AtomicBoolean(false);
+
+    /**
+     * Emission count for the instance.id-unset WARN — independent of the
+     * boolean gate so tests can pin "WARN fires exactly once" rather than
+     * only "gate flipped to true". Incremented inside the CAS-success branch
+     * of {@link #warnIfInstanceIdUnset()}, so a refactor that moves the
+     * {@code LOG.warn} call outside that branch would be caught by the
+     * count-based assertions in {@code PrometheusRemoteWriterStorageTest}.
+     */
+    private static final AtomicInteger INSTANCE_ID_UNSET_WARN_COUNT = new AtomicInteger(0);
 
     /**
      * Everything constructed at {@link #start()} time. Published as a unit via
@@ -270,6 +281,7 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         String iid = config.getInstanceId();
         if ((iid == null || iid.isEmpty())
                 && INSTANCE_ID_UNSET_WARNED.compareAndSet(false, true)) {
+            INSTANCE_ID_UNSET_WARN_COUNT.incrementAndGet();
             LOG.warn("PrometheusRemoteWriter: instance.id is not set. This is fine "
                    + "for a single OpenNMS instance writing to a dedicated backend. "
                    + "If you run multiple OpenNMS instances against a shared "
@@ -279,19 +291,30 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         }
     }
 
-    /** Visible for tests — resets the one-shot WARN gate so a sequence of
-     *  start()/stop() cycles within a single test run can exercise the WARN
-     *  deterministically. */
+    /** Visible for tests — resets BOTH the one-shot WARN gate and the
+     *  emission-count counter so a sequence of start()/stop() cycles within
+     *  a single test run can exercise the WARN deterministically. */
     static void resetInstanceIdWarnedForTesting() {
         INSTANCE_ID_UNSET_WARNED.set(false);
+        INSTANCE_ID_UNSET_WARN_COUNT.set(0);
     }
 
     /** Visible for tests — true once the WARN gate has flipped (i.e. the
-     *  LOG.warn in {@link #warnIfInstanceIdUnset()} has been emitted once
-     *  already within this JVM). Lets tests assert the one-shot semantic
-     *  without taking a dependency on a log-capture framework. */
+     *  LOG.warn in {@link #warnIfInstanceIdUnset()} has been emitted at
+     *  least once already within this JVM). Lets tests assert the one-shot
+     *  semantic without taking a dependency on a log-capture framework. */
     static boolean isInstanceIdWarnedForTesting() {
         return INSTANCE_ID_UNSET_WARNED.get();
+    }
+
+    /** Visible for tests — number of times the instance.id-unset WARN has
+     *  actually been emitted. Pairs with {@link #isInstanceIdWarnedForTesting}
+     *  to distinguish "the gate flipped" from "the log line ran". A refactor
+     *  that keeps the gate semantics correct but accidentally moves the
+     *  {@code LOG.warn} call outside the CAS-success branch would be caught
+     *  by assertions on this counter. */
+    static int getInstanceIdWarnCountForTesting() {
+        return INSTANCE_ID_UNSET_WARN_COUNT.get();
     }
 
     private void logActivationOrDiff() {

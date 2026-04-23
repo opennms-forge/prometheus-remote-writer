@@ -54,9 +54,14 @@ class PrometheusRemoteWriterStorageTest {
     void instance_id_unset_trips_the_warn_gate_on_start() {
         PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(minimal());
         assertThat(PrometheusRemoteWriterStorage.isInstanceIdWarnedForTesting()).isFalse();
+        assertThat(PrometheusRemoteWriterStorage.getInstanceIdWarnCountForTesting()).isZero();
         s.start();
         try {
             assertThat(PrometheusRemoteWriterStorage.isInstanceIdWarnedForTesting()).isTrue();
+            // Count is the stronger assertion — a refactor that keeps the gate
+            // correct but moves LOG.warn outside the CAS-success branch would
+            // pass the boolean check and fail this one.
+            assertThat(PrometheusRemoteWriterStorage.getInstanceIdWarnCountForTesting()).isEqualTo(1);
         } finally {
             s.stop();
         }
@@ -70,6 +75,7 @@ class PrometheusRemoteWriterStorageTest {
         s.start();
         try {
             assertThat(PrometheusRemoteWriterStorage.isInstanceIdWarnedForTesting()).isFalse();
+            assertThat(PrometheusRemoteWriterStorage.getInstanceIdWarnCountForTesting()).isZero();
         } finally {
             s.stop();
         }
@@ -85,12 +91,40 @@ class PrometheusRemoteWriterStorageTest {
         first.start();
         first.stop();
         assertThat(PrometheusRemoteWriterStorage.isInstanceIdWarnedForTesting()).isTrue();
+        assertThat(PrometheusRemoteWriterStorage.getInstanceIdWarnCountForTesting()).isEqualTo(1);
 
         PrometheusRemoteWriterStorage second = new PrometheusRemoteWriterStorage(minimal());
         second.start();
         try {
             // CAS already happened; a second start() cannot re-flip the gate.
             assertThat(PrometheusRemoteWriterStorage.isInstanceIdWarnedForTesting()).isTrue();
+            // And — the stronger check — the WARN emission did NOT recur.
+            assertThat(PrometheusRemoteWriterStorage.getInstanceIdWarnCountForTesting()).isEqualTo(1);
+        } finally {
+            second.stop();
+        }
+    }
+
+    @Test
+    void warn_count_does_not_increment_when_hot_reload_sets_instance_id() {
+        // The specific hot-reload scenario: an operator runs without
+        // instance.id (WARN fires once), then discovers the recommendation and
+        // sets instance.id in config. The blueprint rebuild triggers a fresh
+        // storage bean — the WARN MUST NOT fire a second time regardless of
+        // which way the knob is flipped.
+        PrometheusRemoteWriterStorage first = new PrometheusRemoteWriterStorage(minimal());
+        first.start();
+        first.stop();
+        assertThat(PrometheusRemoteWriterStorage.getInstanceIdWarnCountForTesting()).isEqualTo(1);
+
+        PrometheusRemoteWriterConfig withInstanceId = minimal();
+        withInstanceId.setInstanceId("opennms-us-east");
+        PrometheusRemoteWriterStorage second = new PrometheusRemoteWriterStorage(withInstanceId);
+        second.start();
+        try {
+            // Different branch of warnIfInstanceIdUnset — instance.id is set,
+            // the WARN path isn't taken. Count unchanged.
+            assertThat(PrometheusRemoteWriterStorage.getInstanceIdWarnCountForTesting()).isEqualTo(1);
         } finally {
             second.stop();
         }
@@ -105,6 +139,7 @@ class PrometheusRemoteWriterStorageTest {
         PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(c);
         s.start();
         assertThat(PrometheusRemoteWriterStorage.isInstanceIdWarnedForTesting()).isFalse();
+        assertThat(PrometheusRemoteWriterStorage.getInstanceIdWarnCountForTesting()).isZero();
     }
 
     @Test
