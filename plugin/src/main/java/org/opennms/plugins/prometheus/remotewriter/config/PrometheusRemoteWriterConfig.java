@@ -81,6 +81,7 @@ public class PrometheusRemoteWriterConfig {
     private String labelsInclude;
     private String labelsExclude;
     private String labelsRename;
+    private String labelsCopy;
     private String metricPrefix;
 
     // --- Metadata passthrough ---
@@ -107,6 +108,7 @@ public class PrometheusRemoteWriterConfig {
                 + "etc/org.opennms.plugins.tss.prometheusremotewriter.cfg");
         }
         validateRenameTargets();
+        validateCopyTargets();
         if (hasBasicAuth() && hasBearerAuth()) {
             throw new IllegalStateException(
                 "auth.basic.* and auth.bearer.token are mutually exclusive — "
@@ -270,6 +272,102 @@ public class PrometheusRemoteWriterConfig {
     }
 
     /**
+     * Copies parsed as a {@code { from -> [to1, to2, ...] }} multimap; order
+     * preserved. Unlike {@code labels.rename}, multiple copy directives with
+     * the same {@code from} key are permitted — {@code labels.copy = node ->
+     * instance, node -> host} emits both {@code instance} and {@code host}
+     * with {@code node}'s value.
+     */
+    public Map<String, List<String>> labelsCopyMap() {
+        if (isBlank(labelsCopy)) {
+            return Collections.emptyMap();
+        }
+        Map<String, List<String>> out = new LinkedHashMap<>();
+        for (String pair : labelsCopy.split(",")) {
+            String trimmed = pair.trim();
+            if (trimmed.isEmpty()) continue;
+            String[] parts = trimmed.split("->");
+            if (parts.length != 2) {
+                throw new IllegalStateException(
+                    "labels.copy entry must be 'from->to', got: " + pair);
+            }
+            String from = parts[0].trim();
+            String to   = parts[1].trim();
+            if (from.isEmpty() || to.isEmpty()) {
+                throw new IllegalStateException(
+                    "labels.copy entry has empty side: " + pair);
+            }
+            out.computeIfAbsent(from, k -> new ArrayList<>()).add(to);
+        }
+        Map<String, List<String>> immutable = new LinkedHashMap<>(out.size());
+        for (Map.Entry<String, List<String>> e : out.entrySet()) {
+            immutable.put(e.getKey(), Collections.unmodifiableList(e.getValue()));
+        }
+        return Collections.unmodifiableMap(immutable);
+    }
+
+    /**
+     * Reject {@code labels.copy} entries whose {@code to} target would silently
+     * clobber a default-allowlist label at flush time, duplicate another
+     * copy's target, or collide with a {@code labels.rename} target.
+     *
+     * <p>Mirrors the structure of {@link #validateRenameTargets()} — same
+     * reserved exact set, same reserved prefix list — with one additional
+     * cross-primitive check against rename targets so operators can't have two
+     * writers contending for the same label name.
+     */
+    private void validateCopyTargets() {
+        Map<String, List<String>> copyMap = labelsCopyMap();   // may throw on bad syntax
+        if (copyMap.isEmpty()) return;
+        // Rename validation has already run; extract targets for cross-check.
+        Set<String> renameTargets = new HashSet<>(labelsRenameMap().values());
+        List<String> errors = new ArrayList<>();
+        Set<String> seenTargets = new HashSet<>();
+        for (Map.Entry<String, List<String>> e : copyMap.entrySet()) {
+            for (String to : e.getValue()) {
+                if (LabelMapper.RESERVED_LABEL_NAMES.contains(to)) {
+                    errors.add(
+                        "labels.copy target '" + to + "' collides with the default label '" + to
+                        + "'. The plugin already emits this label; copying onto it would silently "
+                        + "clobber the default value. Pick a different 'to' name.");
+                    continue;
+                }
+                boolean prefixCollision = false;
+                for (String prefix : LabelMapper.RESERVED_LABEL_PREFIXES) {
+                    if (to.startsWith(prefix)) {
+                        String reason = prefix.equals("onms_cat_")
+                                ? "surveillance categories"
+                                : "metadata passthrough";
+                        errors.add(
+                            "labels.copy target '" + to + "' collides with the reserved prefix '"
+                            + prefix + "*' (" + reason + "). Pick a different 'to' name.");
+                        prefixCollision = true;
+                        break;
+                    }
+                }
+                if (prefixCollision) continue;
+                if (renameTargets.contains(to)) {
+                    errors.add(
+                        "labels.copy target '" + to + "' also appears as a labels.rename target. "
+                        + "At most one of rename or copy can write a given label name.");
+                    continue;
+                }
+                if (!seenTargets.add(to)) {
+                    errors.add(
+                        "labels.copy has two entries with the same target '" + to
+                        + "'. At most one copy can target a given label name.");
+                }
+            }
+        }
+        if (!errors.isEmpty()) {
+            String suffix = errors.size() == 1 ? "" : "s";
+            throw new IllegalStateException(
+                "labels.copy has " + errors.size() + " error" + suffix + ":\n  - "
+                + String.join("\n  - ", errors));
+        }
+    }
+
+    /**
      * Human-readable diff against another config, suitable for logging on
      * hot-reload. Returns an empty list when the two configs are equal.
      * Secrets (passwords, bearer token) are masked.
@@ -303,6 +401,7 @@ public class PrometheusRemoteWriterConfig {
         diffStr(out, "labels.include",            other.labelsInclude,         labelsInclude);
         diffStr(out, "labels.exclude",            other.labelsExclude,         labelsExclude);
         diffStr(out, "labels.rename",             other.labelsRename,          labelsRename);
+        diffStr(out, "labels.copy",               other.labelsCopy,            labelsCopy);
         diffStr(out, "metric.prefix",             other.metricPrefix,          metricPrefix);
         diffBool(out, "metadata.enabled",         other.metadataEnabled,       metadataEnabled);
         diffStr(out, "metadata.include",          other.metadataInclude,       metadataInclude);
@@ -338,6 +437,7 @@ public class PrometheusRemoteWriterConfig {
     public void setLabelsInclude(String v)         { labelsInclude = blankToNull(v); }
     public void setLabelsExclude(String v)         { labelsExclude = blankToNull(v); }
     public void setLabelsRename(String v)          { labelsRename = blankToNull(v); }
+    public void setLabelsCopy(String v)            { labelsCopy = blankToNull(v); }
     public void setMetricPrefix(String v)          { metricPrefix = blankToNull(v); }
     public void setMetadataEnabled(boolean v)      { metadataEnabled = v; }
     public void setMetadataInclude(String v)       { metadataInclude = blankToNull(v); }
@@ -397,6 +497,7 @@ public class PrometheusRemoteWriterConfig {
     public String  getLabelsInclude()         { return labelsInclude; }
     public String  getLabelsExclude()         { return labelsExclude; }
     public String  getLabelsRename()          { return labelsRename; }
+    public String  getLabelsCopy()            { return labelsCopy; }
     public String  getMetricPrefix()          { return metricPrefix; }
     public boolean isMetadataEnabled()        { return metadataEnabled; }
     public String  getMetadataInclude()       { return metadataInclude; }

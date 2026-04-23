@@ -455,6 +455,122 @@ class PrometheusRemoteWriterConfigTest {
         assertThat(minimal().diff(minimal())).isEmpty();
     }
 
+    // ---------- labels.copy -------------------------------------------------
+
+    @Test
+    void copy_map_is_empty_when_unset() {
+        assertThat(minimal().labelsCopyMap()).isEmpty();
+    }
+
+    @Test
+    void copy_map_parses_single_entry() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("node -> instance");
+        assertThat(c.labelsCopyMap()).containsExactly(
+            Map.entry("node", List.of("instance")));
+    }
+
+    @Test
+    void copy_map_parses_multiple_entries_with_whitespace() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("node->instance, foreign_source -> tenant ,  ");
+        assertThat(c.labelsCopyMap()).containsExactly(
+            Map.entry("node", List.of("instance")),
+            Map.entry("foreign_source", List.of("tenant")));
+    }
+
+    @Test
+    void copy_map_preserves_multiple_targets_from_same_source() {
+        // Unlike labels.rename, two copies with the same 'from' are allowed:
+        // `node -> instance, node -> host` emits both instance and host.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("node -> instance, node -> host");
+        assertThat(c.labelsCopyMap()).containsExactly(
+            Map.entry("node", List.of("instance", "host")));
+    }
+
+    @Test
+    void copy_map_rejects_malformed_entry() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("oops");
+        assertThatThrownBy(c::labelsCopyMap)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("from->to");
+    }
+
+    @Test
+    void copy_map_rejects_empty_sides() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("-> instance");
+        assertThatThrownBy(c::labelsCopyMap)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("empty side");
+    }
+
+    @Test
+    void copy_to_non_reserved_name_validates() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("node -> instance, foreign_source -> tenant");
+        assertThatCode(c::validate).doesNotThrowAnyException();
+    }
+
+    @Test
+    void copy_target_collides_with_default_label_is_rejected() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("node -> foreign_source");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.copy")
+            .hasMessageContaining("foreign_source")
+            .hasMessageContaining("default label");
+    }
+
+    @Test
+    void copy_target_with_reserved_prefix_is_rejected() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("foo -> onms_cat_router");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.copy")
+            .hasMessageContaining("onms_cat_")
+            .hasMessageContaining("surveillance categories");
+    }
+
+    @Test
+    void copy_duplicate_target_across_entries_is_rejected() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("node -> cluster, foreign_source -> cluster");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.copy")
+            .hasMessageContaining("'cluster'")
+            .hasMessageContaining("same target");
+    }
+
+    @Test
+    void copy_target_collides_with_rename_target_is_rejected() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsRename("node -> instance");
+        c.setLabelsCopy("foreign_source -> instance");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.copy")
+            .hasMessageContaining("'instance'")
+            .hasMessageContaining("labels.rename");
+    }
+
+    @Test
+    void copy_multiple_errors_are_accumulated_into_one_message() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("a -> node, b -> onms_cat_x, c -> cluster, d -> cluster");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.copy has 3 error")
+            .hasMessageContaining("'node'")
+            .hasMessageContaining("onms_cat_")
+            .hasMessageContaining("'cluster'");
+    }
+
     // ---------- helpers -----------------------------------------------------
 
     private static PrometheusRemoteWriterConfig minimal() {
