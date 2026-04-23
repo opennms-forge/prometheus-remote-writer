@@ -70,6 +70,83 @@ corresponding source data is available:
 them: `if_alias` (user-editable, churns), `sys_descr`, `sys_object_id`, asset
 record fields, OpenNMS metadata (see below).
 
+## Label enrichment is two-sided
+
+The default label allowlist is the *write-side* policy: it decides which
+OpenNMS-attached tags become Prometheus labels. The *read-side* — OpenNMS
+attaching those tags to samples in the first place — lives in OpenNMS itself,
+and it is off by default.
+
+```
+OpenNMS metatags config ─▶ MATE interpolation ─▶ sample tags ─▶ plugin label mapping ─▶ Prometheus labels
+   (read-side, you)           (OpenNMS core)       (per Sample)      (this plugin)          (on the wire)
+```
+
+OpenNMS's `MetaTagDataLoader` runs each configured value template through the
+MATE interpolator against the sample's scope and attaches a tag for every
+non-empty result. The property names below and the MATE scope syntax
+(`${node:…}`, `${interface:…}`, `${service:…}`, `${asset:…}`) are as of OpenNMS
+Horizon 35; upstream changes may rename properties in future Horizon releases.
+If you don't configure any `org.opennms.timeseries.tin.metatags.tag.*`
+properties, samples arrive at this plugin carrying only `name` and `resourceId`
+— and your Prometheus series will have bare `{resourceId="…"}` labels
+regardless of what this plugin is configured to emit.
+
+### Minimal metatag config
+
+Put these four lines in `etc/opennms.properties.d/metatags.properties` to
+enable node identity labels:
+
+```properties
+org.opennms.timeseries.tin.metatags.tag.nodeLabel     = ${node:label}
+org.opennms.timeseries.tin.metatags.tag.foreignSource = ${node:foreign-source}
+org.opennms.timeseries.tin.metatags.tag.foreignId     = ${node:foreign-id}
+org.opennms.timeseries.tin.metatags.tag.location      = ${node:location}
+```
+
+After OpenNMS reloads, samples carry those four tags. The plugin's default
+allowlist maps them to `node_label`, `foreign_source`, `foreign_id`, and
+`location`, and derives `node="<fs>:<fid>"` from the pair. For interface
+descriptors (`if_name`, `if_descr`), add:
+
+```properties
+org.opennms.timeseries.tin.metatags.tag.ifName  = ${interface:if-name}
+org.opennms.timeseries.tin.metatags.tag.ifDescr = ${interface:if-description}
+```
+
+### Surveillance categories
+
+Categories are a separate opt-in on the OpenNMS side:
+
+```properties
+org.opennms.timeseries.tin.metatags.exposeCategories = true
+```
+
+Setting this causes OpenNMS to attach a `categories` sample tag (comma-separated
+list of surveillance-category names). The plugin's default allowlist already
+expands that single tag into one `onms_cat_<sanitized-name>` label per value —
+no additional plugin config needed. Without the OpenNMS property, no
+`onms_cat_*` labels appear regardless of what the plugin is configured to emit.
+
+### Comprehensive example
+
+See
+[`e2e/opennms/opennms.properties.d/metatags.properties`](e2e/opennms/opennms.properties.d/metatags.properties)
+for the full set of node, interface, service, asset, and category properties
+the sandbox uses — including SNMP agent info (`sysName`, `sysLocation`,
+`sysDescription`), the full asset-record surface, and interface hostnames.
+The `exposeCategories` line is at
+[`metatags.properties#L116`](e2e/opennms/opennms.properties.d/metatags.properties#L116).
+
+### Caveat — the node record must exist in OpenNMS
+
+`MetaTagDataLoader` resolves node-scope properties by looking up the node via
+its foreign-source/foreign-id pair or its numeric dbId. If the node record
+doesn't exist — typically a requisition that was deleted, or an `fs:fid` that
+never got imported — no interpolation happens and the sample arrives with only
+`name` and `resourceId`. You'll see empty enrichment labels, not garbage
+labels: verify the node exists in OpenNMS before debugging the plugin.
+
 ## Identifying samples from multiple OpenNMS instances
 
 Running more than one OpenNMS instance against the same Prometheus-compatible
