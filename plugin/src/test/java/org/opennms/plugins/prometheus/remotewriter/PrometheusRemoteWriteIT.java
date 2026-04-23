@@ -202,4 +202,128 @@ class PrometheusRemoteWriteIT {
             assertThat(t.getValue()).isEqualTo("it-test");
         });
     }
+
+    @Test
+    void slash_fs_resource_id_acquires_node_and_parsed_components() throws Exception {
+        // Self-monitor / JMX-shaped resourceId: `snmp/fs/<fs>/<fid>/<group>/<instance>`.
+        // Previously these samples reached Prometheus with only `{resourceId="..."}`;
+        // v0.2 parses the slash-path and emits `node`, `resource_type`,
+        // `resource_instance` from the resourceId alone.
+        Instant now = Instant.now();
+        String metricName = "onms_it_slashfs_" + System.nanoTime();
+        Sample sample = ImmutableSample.builder()
+                .metric(ImmutableMetric.builder()
+                        .intrinsicTag("name", metricName)
+                        .intrinsicTag("resourceId",
+                                "snmp/fs/selfmonitor/1/opennms-jvm/OpenNMS_Name_Notifd")
+                        .build())
+                .time(now)
+                .value(7.5)
+                .build();
+
+        storage.store(List.of(sample));
+
+        PluginMetrics m = storage.getMetrics();
+        await().atMost(Duration.ofSeconds(20))
+               .until(() -> m.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue() >= 1L);
+
+        TagMatcher nameMatcher = ImmutableTagMatcher.builder()
+                .type(TagMatcher.Type.EQUALS)
+                .key("name")
+                .value(metricName)
+                .build();
+
+        List<Metric> found = await().atMost(Duration.ofSeconds(20))
+                .until(() -> storage.findMetrics(List.of(nameMatcher)),
+                       list -> !list.isEmpty());
+        assertThat(found).hasSize(1);
+
+        var keys = found.get(0).getMetaTags().stream().map(t -> t.getKey()).toList();
+        assertThat(keys).contains("node", "resource_type", "resource_instance");
+
+        // Values round-trip: parsed from the slash-FS grammar, `<fs>:<fid>` for node.
+        assertThat(found.get(0).getMetaTags())
+                .anySatisfy(t -> {
+                    assertThat(t.getKey()).isEqualTo("node");
+                    assertThat(t.getValue()).isEqualTo("selfmonitor:1");
+                })
+                .anySatisfy(t -> {
+                    assertThat(t.getKey()).isEqualTo("resource_type");
+                    assertThat(t.getValue()).isEqualTo("opennms-jvm");
+                })
+                .anySatisfy(t -> {
+                    assertThat(t.getKey()).isEqualTo("resource_instance");
+                    assertThat(t.getValue()).isEqualTo("OpenNMS_Name_Notifd");
+                });
+    }
+
+    @Test
+    void labels_include_star_does_not_introduce_duplicate_meta_tags() throws Exception {
+        // Rebuild the storage with labels.include = * — the canonical footgun
+        // that v0.1 turned into duplicate labels (`name` alongside `__name__`,
+        // `resource_id` alongside `resourceId`). v0.2's consumed-keys dedup
+        // means these source keys are skipped; the read-back series must NOT
+        // carry meta tags with those names.
+        storage.stop();
+        PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+        String base = "http://" + prometheus.getHost() + ":" + prometheus.getMappedPort(9090);
+        c.setWriteUrl(base + "/api/v1/write");
+        c.setReadUrl(base);
+        c.setLabelsInclude("*");
+        c.setBatchSize(10);
+        c.setFlushIntervalMs(100);
+        c.setRetryInitialBackoffMs(100);
+        c.setRetryMaxBackoffMs(500);
+        c.setRetryMaxAttempts(10);
+        c.setShutdownGracePeriodMs(2_000);
+        storage = new PrometheusRemoteWriterStorage(c);
+        storage.start();
+
+        Instant now = Instant.now();
+        String metricName = "onms_it_dedup_" + System.nanoTime();
+        Sample sample = ImmutableSample.builder()
+                .metric(ImmutableMetric.builder()
+                        .intrinsicTag("name", metricName)
+                        .intrinsicTag("resourceId", "nodeSource[NOC:it-dedup].interfaceSnmp[eth0]")
+                        .externalTag("foreignSource", "NOC")
+                        .externalTag("foreignId", "it-dedup")
+                        .externalTag("nodeLabel", "it-dedup.example.com")
+                        .externalTag("location", "lab")
+                        .externalTag("ifName", "eth0")
+                        .externalTag("ifDescr", "GigabitEthernet0/0")
+                        .externalTag("ifHighSpeed", "1000")
+                        .externalTag("ifSpeed", "4294967295")
+                        .externalTag("nodeId", "42")
+                        .externalTag("categories", "Routers")
+                        .build())
+                .time(now)
+                .value(3.0)
+                .build();
+
+        storage.store(List.of(sample));
+
+        PluginMetrics m = storage.getMetrics();
+        await().atMost(Duration.ofSeconds(20))
+               .until(() -> m.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue() >= 1L);
+
+        TagMatcher nameMatcher = ImmutableTagMatcher.builder()
+                .type(TagMatcher.Type.EQUALS)
+                .key("name")
+                .value(metricName)
+                .build();
+
+        List<Metric> found = await().atMost(Duration.ofSeconds(20))
+                .until(() -> storage.findMetrics(List.of(nameMatcher)),
+                       list -> !list.isEmpty());
+        assertThat(found).hasSize(1);
+
+        // The five v0.1 duplicates must NOT appear as meta tags.
+        var keys = found.get(0).getMetaTags().stream().map(t -> t.getKey()).toList();
+        assertThat(keys).doesNotContain("name", "resource_id", "if_high_speed", "node_id", "categories");
+
+        // The canonical defaults ARE still present.
+        assertThat(keys).contains(
+                "node", "foreign_source", "foreign_id", "node_label", "location",
+                "if_name", "if_descr", "if_speed", "onms_cat_Routers");
+    }
 }
