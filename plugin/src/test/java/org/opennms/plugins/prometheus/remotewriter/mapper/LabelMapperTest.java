@@ -13,7 +13,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.junit.jupiter.api.Test;
 import org.opennms.integration.api.v1.timeseries.Sample;
@@ -306,6 +308,125 @@ class LabelMapperTest {
         assertThat(out.labels()).doesNotContainKey("location");
     }
 
+    // ---------- consumed-keys dedup (v0.2) ----------------------------------
+
+    @Test
+    void labels_include_star_does_not_re_emit_consumed_source_keys() {
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setLabelsInclude("*");
+        MappedSample out = new LabelMapper(c).map(fullFixtureSample());
+        // Five duplicates v0.1 produced under `labels.include = *` are gone:
+        // the source-key snake-cased forms that did NOT collide with a default
+        // label name, and therefore slipped past v0.1's putIfAbsent dedup.
+        assertThat(out.labels()).doesNotContainKey("name");
+        assertThat(out.labels()).doesNotContainKey("resource_id");
+        assertThat(out.labels()).doesNotContainKey("if_high_speed");
+        assertThat(out.labels()).doesNotContainKey("node_id");
+        assertThat(out.labels()).doesNotContainKey("categories");
+    }
+
+    @Test
+    void labels_include_star_preserves_default_allowlist_labels() {
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setLabelsInclude("*");
+        MappedSample out = new LabelMapper(c).map(fullFixtureSample());
+        assertThat(out.labels()).containsEntry("__name__", "ifHCInOctets");
+        assertThat(out.labels()).containsKey("resourceId");
+        assertThat(out.labels()).containsKey("node");
+        assertThat(out.labels()).containsEntry("foreign_source", "NOC");
+        assertThat(out.labels()).containsEntry("foreign_id", "router-42");
+        assertThat(out.labels()).containsEntry("node_label", "router-42.example.com");
+        assertThat(out.labels()).containsEntry("location", "default");
+        assertThat(out.labels()).containsEntry("if_name", "eth0");
+        assertThat(out.labels()).containsEntry("if_descr", "GigabitEthernet0/0");
+        assertThat(out.labels()).containsEntry("if_speed", "1000000000");
+        assertThat(out.labels()).containsEntry("onms_cat_Routers", "true");
+        assertThat(out.labels()).containsEntry("onms_cat_ProductionSites", "true");
+    }
+
+    @Test
+    void labels_include_star_does_not_introduce_collide_on_name_duplicates() {
+        // Regression: v0.1's putIfAbsent already blocked these 7 labels from
+        // being duplicated under `labels.include = *` because their
+        // snake-cased source-key forms collide with a default label name.
+        // The consumed-keys mechanism must preserve that single-value property.
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setLabelsInclude("*");
+        MappedSample out = new LabelMapper(c).map(fullFixtureSample());
+        assertThat(out.labels().get("foreign_source")).isEqualTo("NOC");
+        assertThat(out.labels().get("foreign_id")).isEqualTo("router-42");
+        assertThat(out.labels().get("node_label")).isEqualTo("router-42.example.com");
+        assertThat(out.labels().get("location")).isEqualTo("default");
+        assertThat(out.labels().get("if_name")).isEqualTo("eth0");
+        assertThat(out.labels().get("if_descr")).isEqualTo("GigabitEthernet0/0");
+        assertThat(out.labels().get("if_speed")).isEqualTo("1000000000");
+    }
+
+    @Test
+    void labels_include_narrow_globs_surface_non_default_source_tags() {
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setLabelsInclude("sys*, asset*");
+        ImmutableMetric.MetricBuilder mb = fullFixtureBuilder()
+                .externalTag("sysDescription", "Linux 5.15")
+                .externalTag("assetRegion", "us-east");
+        MappedSample out = new LabelMapper(c).map(sample(mb));
+        assertThat(out.labels()).containsEntry("sys_description", "Linux 5.15");
+        assertThat(out.labels()).containsEntry("asset_region", "us-east");
+    }
+
+    @Test
+    void rename_of_default_plus_include_star_does_not_re_emit_source_key() {
+        // In v0.1 this pair produced both `foreign_source_raw` (renamed
+        // default) and `foreign_source` (re-surfaced from the `foreignSource`
+        // source tag via labels.include = *). Under consumed-keys the source
+        // key is skipped, so only `foreign_source_raw` remains.
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setLabelsRename("foreign_source -> foreign_source_raw");
+        c.setLabelsInclude("*");
+        MappedSample out = new LabelMapper(c).map(fullFixtureSample());
+        assertThat(out.labels()).containsEntry("foreign_source_raw", "NOC");
+        assertThat(out.labels()).doesNotContainKey("foreign_source");
+    }
+
+    // ---------- drift guard -------------------------------------------------
+
+    @Test
+    void consumed_keys_covers_all_buildDefaults_source_reads() {
+        // Given a fixture carrying every source key buildDefaults currently
+        // reads, the returned consumedSourceKeys set must equal that set
+        // exactly. Reviewers adding a new source-key read to buildDefaults
+        // must update this test — that's the point.
+        Map<String, String> tags = new LinkedHashMap<>();
+        tags.put("name", "ifHCInOctets");
+        tags.put("resourceId", "nodeSource[NOC:router-42].interfaceSnmp[eth0]");
+        tags.put("foreignSource", "NOC");
+        tags.put("foreignId", "router-42");
+        tags.put("nodeLabel", "router-42.example.com");
+        tags.put("location", "default");
+        tags.put("ifName", "eth0");
+        tags.put("ifDescr", "GigabitEthernet0/0");
+        tags.put("ifHighSpeed", "1000");
+        tags.put("ifSpeed", "4294967295");
+        tags.put("nodeId", "42");
+        tags.put("categories", "Routers, ProductionSites");
+
+        LabelMapper.Defaults defaults = LabelMapper.buildDefaults("ifHCInOctets", tags, null);
+
+        assertThat(defaults.consumedSourceKeys()).containsExactlyInAnyOrder(
+                "name",
+                "resourceId",
+                "foreignSource",
+                "foreignId",
+                "nodeLabel",
+                "location",
+                "ifName",
+                "ifDescr",
+                "ifHighSpeed",
+                "ifSpeed",
+                "nodeId",
+                "categories");
+    }
+
     // ---------- fixtures ----------------------------------------------------
 
     /** A well-populated interface sample: FS-qualified node, 2 categories, 1 Gbps. */
@@ -330,6 +451,29 @@ class LabelMapperTest {
             mb.externalTag(extraKey, extraValue);
         }
         return sample(mb);
+    }
+
+    /** Fixture carrying every source key buildDefaults consults, including
+     *  `nodeId` (redundant with FS-qualified identity but exercised by the
+     *  consumed-keys dedup tests). */
+    private static Sample fullFixtureSample() {
+        return sample(fullFixtureBuilder());
+    }
+
+    private static ImmutableMetric.MetricBuilder fullFixtureBuilder() {
+        return ImmutableMetric.builder()
+                .intrinsicTag("name", "ifHCInOctets")
+                .intrinsicTag("resourceId", "nodeSource[NOC:router-42].interfaceSnmp[eth0]")
+                .externalTag("nodeLabel", "router-42.example.com")
+                .externalTag("foreignSource", "NOC")
+                .externalTag("foreignId", "router-42")
+                .externalTag("location", "default")
+                .externalTag("ifName", "eth0")
+                .externalTag("ifDescr", "GigabitEthernet0/0")
+                .externalTag("ifHighSpeed", "1000")
+                .externalTag("ifSpeed", "4294967295")
+                .externalTag("nodeId", "42")
+                .externalTag("categories", "Routers, ProductionSites");
     }
 
     private static Sample sample(ImmutableMetric.MetricBuilder metricBuilder) {

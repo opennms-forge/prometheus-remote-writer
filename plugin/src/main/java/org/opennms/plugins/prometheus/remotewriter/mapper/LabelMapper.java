@@ -10,6 +10,7 @@
 package org.opennms.plugins.prometheus.remotewriter.mapper;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -130,9 +131,9 @@ public final class LabelMapper {
             metricName = metricPrefix + metricName;
         }
 
-        Map<String, String> labels = buildDefaults(metricName, sourceTags, instanceId);
-        labels = applyExclude(labels, excludeGlobs);
-        labels = applyInclude(labels, sourceTags, includeGlobs);
+        Defaults defaults = buildDefaults(metricName, sourceTags, instanceId);
+        Map<String, String> labels = applyExclude(defaults.labels(), excludeGlobs);
+        labels = applyInclude(labels, sourceTags, includeGlobs, defaults.consumedSourceKeys());
         labels = applyRename(labels, renameMap);
         // Metadata passthrough runs last so its prefix-namespaced labels are
         // not renamed or excluded by labels.* rules; the default allowlist
@@ -147,19 +148,31 @@ public final class LabelMapper {
 
     // -- defaults -------------------------------------------------------------
 
-    private static Map<String, String> buildDefaults(String metricName, Map<String, String> tags, String instanceId) {
+    /**
+     * Result of {@link #buildDefaults}: the label map plus the set of source-tag
+     * keys the default allowlist consumed. {@link #applyInclude} uses the set to
+     * skip keys the defaults already own, preventing {@code labels.include = *}
+     * from re-emitting them under a snake-cased alias.
+     */
+    record Defaults(Map<String, String> labels, Set<String> consumedSourceKeys) {}
+
+    static Defaults buildDefaults(String metricName, Map<String, String> tags, String instanceId) {
         Map<String, String> out = new LinkedHashMap<>();
+        Set<String> consumed = new HashSet<>();
 
         // onms_instance_id — emitted first so it reads as the origin stamp
-        // when humans skim the series. Absent when instance.id is unset.
+        // when humans skim the series. Absent when instance.id is unset. The
+        // value comes from config, not source tags, so nothing is consumed.
         if (instanceId != null && !instanceId.isEmpty()) {
             out.put("onms_instance_id", Sanitizer.labelValue(instanceId));
         }
 
         // __name__
+        consumed.add(IntrinsicTagNames.name);
         out.put("__name__", Sanitizer.metricName(metricName));
 
         // resourceId raw + parsed components
+        consumed.add(IntrinsicTagNames.resourceId);
         String resourceId = tags.get(IntrinsicTagNames.resourceId);
         ResourceIdParser.Parsed parsed = null;
         if (resourceId != null) {
@@ -173,7 +186,12 @@ public final class LabelMapper {
 
         // node identity — FS-qualified preferred, then parsed nodeId, then numeric dbId.
         // A half-populated pair (one side empty or blank) falls through rather
-        // than emitting "fs:" or ":fid" with a dangling colon.
+        // than emitting "fs:" or ":fid" with a dangling colon. All three source
+        // keys are marked consumed even on fall-through so `labels.include = *`
+        // never re-surfaces them under a snake-cased alias.
+        consumed.add("foreignSource");
+        consumed.add("foreignId");
+        consumed.add("nodeId");
         String fs  = tags.get("foreignSource");
         String fid = tags.get("foreignId");
         if (fs != null && !fs.isEmpty() && fid != null && !fid.isEmpty()) {
@@ -187,6 +205,10 @@ public final class LabelMapper {
             }
         }
 
+        consumed.add("nodeLabel");
+        consumed.add("location");
+        consumed.add("ifName");
+        consumed.add("ifDescr");
         putIfPresent(out, "node_label",     tags, "nodeLabel");
         putIfPresent(out, "foreign_source", tags, "foreignSource");
         putIfPresent(out, "foreign_id",     tags, "foreignId");
@@ -195,6 +217,8 @@ public final class LabelMapper {
         putIfPresent(out, "if_descr",       tags, "ifDescr");
 
         // if_speed normalisation
+        consumed.add("ifHighSpeed");
+        consumed.add("ifSpeed");
         Long ifSpeed = IfSpeedNormalizer.normalize(tags.get("ifHighSpeed"), tags.get("ifSpeed"));
         if (ifSpeed != null) {
             out.put("if_speed", Long.toString(ifSpeed));
@@ -204,6 +228,7 @@ public final class LabelMapper {
         // `categories` tag with comma-separated values — the convention used
         // by OpenNMS's TSS adapter as of v0.1. Revisit in 15.2 if real
         // deployments surface categories differently.
+        consumed.add("categories");
         String categories = tags.get("categories");
         if (categories != null && !categories.isEmpty()) {
             for (String cat : categories.split(",")) {
@@ -214,7 +239,7 @@ public final class LabelMapper {
                 }
             }
         }
-        return out;
+        return new Defaults(out, Set.copyOf(consumed));
     }
 
     private static void putIfPresent(Map<String, String> out, String labelName,
@@ -236,17 +261,20 @@ public final class LabelMapper {
 
     private static Map<String, String> applyInclude(Map<String, String> labels,
                                                     Map<String, String> sourceTags,
-                                                    List<Pattern> includeGlobs) {
+                                                    List<Pattern> includeGlobs,
+                                                    Set<String> consumedSourceKeys) {
         if (includeGlobs.isEmpty()) return labels;
         Map<String, String> out = new LinkedHashMap<>(labels);
         for (Map.Entry<String, String> e : sourceTags.entrySet()) {
+            // Default allowlist owns these keys — skip so labels.include = *
+            // does not re-emit them under a snake-cased alias (e.g. 'name'
+            // alongside '__name__', 'resource_id' alongside 'resourceId').
+            if (consumedSourceKeys.contains(e.getKey())) continue;
             if (!matchesAny(e.getKey(), includeGlobs)) continue;
             // Match the default allowlist's camelCase → snake_case convention
             // (e.g. ifName → if_name) so an operator writing
             // "labels.include = ifAlias" sees the same shape as the built-ins.
             String labelName = Sanitizer.labelName(MetadataProcessor.toSnakeCase(e.getKey()));
-            // Don't overwrite defaults; the allowlist wins if it already
-            // emitted a label with this name.
             out.putIfAbsent(labelName, Sanitizer.labelValue(e.getValue()));
         }
         return out;
