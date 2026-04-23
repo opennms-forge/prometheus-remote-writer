@@ -298,6 +298,28 @@ public final class LabelMapper {
         return out;
     }
 
+    /**
+     * Rename is internally equivalent to a copy-then-drop operation on the
+     * same source: the renamed key is emitted under the new name, the old
+     * name is removed, and the value is preserved. This equivalence is
+     * scoped INSIDE rename — the plugin's {@code labels.exclude} config runs
+     * as an earlier pipeline stage (before {@link #applyInclude} and
+     * {@link #applyCopy}), so an operator writing
+     * {@code labels.copy = node -> cluster, labels.exclude = node} does NOT
+     * recreate rename's behavior: the external exclude drops {@code node}
+     * before copy can read it. Rename is the only way to get "one label
+     * replaces another" semantics at the config surface.
+     *
+     * <p>We deliberately do NOT express rename as a literal call to
+     * {@link #applyCopy} plus an exclude pass: that would shift the renamed
+     * key to the tail of the iteration order, whereas walking the input map
+     * in place preserves insertion position. Label iteration order is not
+     * part of the wire protocol (Prometheus Remote Write sorts labels
+     * alphabetically before serialization), but it IS observed by unit tests.
+     *
+     * <p>If a new rule is added to rename's target validation, mirror it in
+     * {@code validateCopyTargets()} — and vice versa.
+     */
     private static Map<String, String> applyRename(Map<String, String> labels, Map<String, String> renameMap) {
         if (renameMap.isEmpty()) return labels;
         Map<String, String> out = new LinkedHashMap<>(labels.size());

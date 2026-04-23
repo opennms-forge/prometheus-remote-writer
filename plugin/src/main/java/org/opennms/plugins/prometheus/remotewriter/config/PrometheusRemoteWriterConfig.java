@@ -189,27 +189,11 @@ public class PrometheusRemoteWriterConfig {
         Set<String> seenTargets = new HashSet<>();
         for (Map.Entry<String, String> e : renameMap.entrySet()) {
             String to = e.getValue();
-            if (LabelMapper.RESERVED_LABEL_NAMES.contains(to)) {
-                errors.add(
-                    "labels.rename target '" + to + "' collides with the default label '" + to
-                    + "'. The plugin already emits this label; renaming onto it would silently "
-                    + "clobber the default value. Pick a different 'to' name.");
+            String reservedError = checkReservedCollision("labels.rename", "renaming", to);
+            if (reservedError != null) {
+                errors.add(reservedError);
                 continue;
             }
-            boolean prefixCollision = false;
-            for (String prefix : LabelMapper.RESERVED_LABEL_PREFIXES) {
-                if (to.startsWith(prefix)) {
-                    String reason = prefix.equals("onms_cat_")
-                            ? "surveillance categories"
-                            : "metadata passthrough";
-                    errors.add(
-                        "labels.rename target '" + to + "' collides with the reserved prefix '"
-                        + prefix + "*' (" + reason + "). Pick a different 'to' name.");
-                    prefixCollision = true;
-                    break;
-                }
-            }
-            if (prefixCollision) continue;
             if (!seenTargets.add(to)) {
                 errors.add(
                     "labels.rename has two entries with the same target '" + to
@@ -222,6 +206,31 @@ public class PrometheusRemoteWriterConfig {
                 "labels.rename has " + errors.size() + " error" + suffix + ":\n  - "
                 + String.join("\n  - ", errors));
         }
+    }
+
+    /**
+     * Shared collision check for {@code labels.rename} and {@code labels.copy}
+     * target validation. Returns a formatted error message if {@code to}
+     * collides with a default-allowlist label name or a reserved prefix;
+     * returns {@code null} when clean. A new collision rule added here applies
+     * uniformly to both primitives — which is the point.
+     */
+    private static String checkReservedCollision(String primitiveKey, String verbIng, String to) {
+        if (LabelMapper.RESERVED_LABEL_NAMES.contains(to)) {
+            return primitiveKey + " target '" + to + "' collides with the default label '" + to
+                + "'. The plugin already emits this label; " + verbIng + " onto it would silently "
+                + "clobber the default value. Pick a different 'to' name.";
+        }
+        for (String prefix : LabelMapper.RESERVED_LABEL_PREFIXES) {
+            if (to.startsWith(prefix)) {
+                String reason = prefix.equals("onms_cat_")
+                        ? "surveillance categories"
+                        : "metadata passthrough";
+                return primitiveKey + " target '" + to + "' collides with the reserved prefix '"
+                    + prefix + "*' (" + reason + "). Pick a different 'to' name.";
+            }
+        }
+        return null;
     }
 
     public boolean hasBasicAuth()  { return !isBlank(basicUsername) || !isBlank(basicPassword); }
@@ -325,27 +334,11 @@ public class PrometheusRemoteWriterConfig {
         Set<String> seenTargets = new HashSet<>();
         for (Map.Entry<String, List<String>> e : copyMap.entrySet()) {
             for (String to : e.getValue()) {
-                if (LabelMapper.RESERVED_LABEL_NAMES.contains(to)) {
-                    errors.add(
-                        "labels.copy target '" + to + "' collides with the default label '" + to
-                        + "'. The plugin already emits this label; copying onto it would silently "
-                        + "clobber the default value. Pick a different 'to' name.");
+                String reservedError = checkReservedCollision("labels.copy", "copying", to);
+                if (reservedError != null) {
+                    errors.add(reservedError);
                     continue;
                 }
-                boolean prefixCollision = false;
-                for (String prefix : LabelMapper.RESERVED_LABEL_PREFIXES) {
-                    if (to.startsWith(prefix)) {
-                        String reason = prefix.equals("onms_cat_")
-                                ? "surveillance categories"
-                                : "metadata passthrough";
-                        errors.add(
-                            "labels.copy target '" + to + "' collides with the reserved prefix '"
-                            + prefix + "*' (" + reason + "). Pick a different 'to' name.");
-                        prefixCollision = true;
-                        break;
-                    }
-                }
-                if (prefixCollision) continue;
                 if (renameTargets.contains(to)) {
                     errors.add(
                         "labels.copy target '" + to + "' also appears as a labels.rename target. "
