@@ -84,6 +84,15 @@ public class PrometheusRemoteWriterConfig {
     private String labelsCopy;
     private String metricPrefix;
 
+    // --- Parsed-map caches ---
+    // labelsRenameMap() / labelsCopyMap() are called multiple times per
+    // validate() (once per sub-validator) and again from LabelMapper's
+    // constructor. Cache the parsed result once per underlying-string
+    // lifecycle; setters invalidate. Parse errors stay uncached so each
+    // call re-throws deterministically (see parse-error-idempotence tests).
+    private transient Map<String, String> cachedLabelsRenameMap;
+    private transient Map<String, List<String>> cachedLabelsCopyMap;
+
     // --- Metadata passthrough ---
     private boolean      metadataEnabled;
     private String       metadataInclude;
@@ -258,8 +267,19 @@ public class PrometheusRemoteWriterConfig {
     public List<String> metadataIncludeGlobs() { return parseCsv(metadataInclude); }
     public List<String> metadataExcludeGlobs() { return parseCsv(metadataExclude); }
 
-    /** Renames parsed as a { from -> to } map; order preserved. */
+    /** Renames parsed as a { from -> to } map; order preserved. Cached — the
+     *  same map instance is returned on every call until {@link #setLabelsRename}
+     *  is invoked with a new value. Parse errors are NOT cached: a subsequent
+     *  call with the same malformed string re-parses and re-throws. */
     public Map<String, String> labelsRenameMap() {
+        if (cachedLabelsRenameMap != null) {
+            return cachedLabelsRenameMap;
+        }
+        cachedLabelsRenameMap = parseLabelsRenameMap();
+        return cachedLabelsRenameMap;
+    }
+
+    private Map<String, String> parseLabelsRenameMap() {
         if (isBlank(labelsRename)) {
             return Collections.emptyMap();
         }
@@ -305,8 +325,21 @@ public class PrometheusRemoteWriterConfig {
      * the same {@code from} key are permitted — {@code labels.copy = node ->
      * instance, node -> host} emits both {@code instance} and {@code host}
      * with {@code node}'s value.
+     *
+     * <p>Cached — the same map instance is returned on every call until
+     * {@link #setLabelsCopy} is invoked with a new value. Parse errors are NOT
+     * cached: a subsequent call with the same malformed string re-parses and
+     * re-throws.
      */
     public Map<String, List<String>> labelsCopyMap() {
+        if (cachedLabelsCopyMap != null) {
+            return cachedLabelsCopyMap;
+        }
+        cachedLabelsCopyMap = parseLabelsCopyMap();
+        return cachedLabelsCopyMap;
+    }
+
+    private Map<String, List<String>> parseLabelsCopyMap() {
         if (isBlank(labelsCopy)) {
             return Collections.emptyMap();
         }
@@ -471,8 +504,14 @@ public class PrometheusRemoteWriterConfig {
     public void setMaxSeriesLookbackSeconds(long v)   { maxSeriesLookbackSeconds = v; }
     public void setLabelsInclude(String v)         { labelsInclude = blankToNull(v); }
     public void setLabelsExclude(String v)         { labelsExclude = blankToNull(v); }
-    public void setLabelsRename(String v)          { labelsRename = blankToNull(v); }
-    public void setLabelsCopy(String v)            { labelsCopy = blankToNull(v); }
+    public void setLabelsRename(String v) {
+        labelsRename = blankToNull(v);
+        cachedLabelsRenameMap = null;
+    }
+    public void setLabelsCopy(String v) {
+        labelsCopy = blankToNull(v);
+        cachedLabelsCopyMap = null;
+    }
     public void setMetricPrefix(String v)          { metricPrefix = blankToNull(v); }
     public void setMetadataEnabled(boolean v)      { metadataEnabled = v; }
     public void setMetadataInclude(String v)       { metadataInclude = blankToNull(v); }
