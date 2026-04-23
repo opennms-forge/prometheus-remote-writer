@@ -452,6 +452,7 @@ max-series-lookback-seconds   = 7776000   # 90 days
 labels.include                =
 labels.exclude                =
 labels.rename                 =
+labels.copy                   =
 metric.prefix                 =
 
 # Metadata passthrough (OFF by default)
@@ -479,6 +480,45 @@ If you deliberately want more context, opt in with
 `labels.include = ifAlias, sysDescr, sysObjectId` or similar. Globs work
 (`labels.include = asset_*`). Each operator addition multiplies your series
 space, so prefer narrow globs.
+
+**Label pipeline — rename vs. copy.** Both primitives produce a label under a
+new name, but the mental model differs:
+
+- **`labels.rename`** changes a label's name. The original disappears.
+- **`labels.copy`** adds a second name for a label. Both names remain present
+  with the same value.
+
+They run in a fixed pipeline: `defaults → exclude → include → copy → rename →
+metadata`. Copy is one-pass (sees labels that exist at its stage entry; does
+not recurse) and operates on pre-rename names. Reserved-target rules apply
+symmetrically to both — a `to` value that collides with a default label name,
+a reserved prefix (`onms_cat_*`, `onms_meta_*`), another rename target, or
+another copy target is rejected at startup with an actionable error.
+
+**Common `labels.copy` recipes:**
+
+```properties
+# Dashboard portability — Prometheus-idiomatic dashboards filter on
+# `instance`; OpenNMS samples carry `node`. Emit both so existing
+# node-exporter-style dashboards work without rewriting queries.
+labels.copy = node -> instance
+
+# Multi-tenant Mimir — emit `tenant` as a copy of `foreign_source` so
+# per-requisition dashboards and the backend's tenant-id convention
+# both key off the same value.
+labels.copy = foreign_source -> tenant
+
+# Migration-period dual emission — when changing a label name, copy the
+# old name onto the new one for a release cycle so dashboards and alert
+# rules can migrate gradually. Drop the copy once the rename lands.
+labels.copy = node -> old_node_id
+```
+
+If you want the value under a new name AND you want to drop the original,
+use `labels.rename` — it does both in one directive. A `labels.copy` source
+that doesn't exist at copy time (typo, or a label the plugin never emits on
+this deployment) produces a single startup `WARN` naming the unknown source;
+it does not block startup.
 
 **Metadata gating.** `metadata.enabled = true` opts into the OpenNMS metadata
 passthrough. The built-in denylist (`*password*`, `*secret*`, `*token*`,
