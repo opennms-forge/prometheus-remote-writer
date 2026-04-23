@@ -508,6 +508,41 @@ class LabelMapperTest {
     }
 
     @Test
+    void copy_input_map_is_read_only_during_stage() {
+        // The hardest test of the one-pass-reads-from-input invariant: the
+        // second copy directive's source is a label that was CLOBBERED by the
+        // first directive's target. If applyCopy were reading from its own
+        // `out` map (the naive chained-copy), the second directive would see
+        // the clobbered value. Reading from the input `labels` map, it sees
+        // the original include-surfaced value.
+        //
+        // Config: labels.include surfaces source tag `sourceX` as label
+        // `source_x="include-value"`. labels.copy then runs two directives:
+        //   1. node -> source_x (clobbers the include-surfaced label; WARN)
+        //   2. source_x -> new_target (must see the ORIGINAL include-value,
+        //      not the clobbered node value)
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setLabelsInclude("sourceX");
+        c.setLabelsCopy("node -> source_x, source_x -> new_target");
+        Sample s = interfaceSampleWith("sourceX", "include-value");
+        LabelMapper mapper = new LabelMapper(c);
+
+        MappedSample out = mapper.map(s);
+
+        // First directive: source_x is the clobber target and ends up with
+        // node's value (the documented clobber behavior).
+        assertThat(out.labels()).containsEntry("source_x", "NOC:router-42");
+        // Second directive: source_x as source reads from the ORIGINAL
+        // labels map, not from the partial `out` — so new_target holds
+        // the include-surfaced value.
+        assertThat(out.labels()).containsEntry("new_target", "include-value");
+        // Node is still present (not renamed).
+        assertThat(out.labels()).containsEntry("node", "NOC:router-42");
+        // Clobber WARN fired once for source_x.
+        assertThat(mapper.warnedCopyTargetClobbersForTesting()).containsExactly("source_x");
+    }
+
+    @Test
     void copy_source_with_empty_value_is_treated_as_absent() {
         // An include-surfaced source tag with an empty value would, without
         // this guard, be copied as-is — and Prometheus treats empty-valued
