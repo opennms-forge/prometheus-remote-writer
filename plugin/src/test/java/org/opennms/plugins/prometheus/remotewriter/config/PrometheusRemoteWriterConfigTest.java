@@ -499,6 +499,77 @@ class PrometheusRemoteWriterConfigTest {
     }
 
     @Test
+    void copy_map_rejects_trailing_arrow() {
+        // `a->b->` used to split to length 2 because Java's default split
+        // drops trailing empty strings, silently parsing as `a -> b`. With
+        // the -1 limit, the trailing arrow produces a third empty part and
+        // the entry is rejected as malformed.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("a->b->");
+        assertThatThrownBy(c::labelsCopyMap)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("from->to");
+    }
+
+    @Test
+    void rename_map_rejects_trailing_arrow() {
+        // Same silent-truncation bug lived in labels.rename too; same fix.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsRename("a->b->");
+        assertThatThrownBy(c::labelsRenameMap)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("from->to");
+    }
+
+    @Test
+    void copy_target_with_invalid_prometheus_grammar_is_rejected() {
+        // `foreign-source` is not a valid Prometheus label name; at emit time
+        // the Sanitizer would rewrite it to `foreign_source`, silently
+        // clobbering the default label. Reject at startup with an explicit
+        // "not a valid Prometheus label name" message so operators fix the
+        // source of the problem rather than seeing a downstream reserved-name
+        // error after renaming.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("x -> foreign-source");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.copy")
+            .hasMessageContaining("'foreign-source'")
+            .hasMessageContaining("not a valid Prometheus label name")
+            .hasMessageContaining("'foreign_source'");   // sanitized form shown as hint
+    }
+
+    @Test
+    void rename_target_with_invalid_prometheus_grammar_is_rejected() {
+        // Same sanitary guard applies to labels.rename — previously the raw
+        // string could pass the reserved-name check even if its sanitized
+        // form collided.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsRename("node -> foreign-source");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.rename")
+            .hasMessageContaining("'foreign-source'")
+            .hasMessageContaining("not a valid Prometheus label name");
+    }
+
+    @Test
+    void copy_two_raw_targets_that_sanitize_to_same_name_are_rejected_individually() {
+        // `foo-bar` and `foo_bar` both sanitize to `foo_bar`. Previously both
+        // would pass the raw-string duplicate-target check and the second
+        // would silently overwrite the first at emit. Now each hits the
+        // grammar rejection on its own line (foo-bar has the hyphen,
+        // foo_bar is valid but is caught as duplicate only after one of
+        // them is corrected).
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("a -> foo-bar, b -> foo_bar");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("'foo-bar'")
+            .hasMessageContaining("not a valid Prometheus label name");
+    }
+
+    @Test
     void copy_map_rejects_empty_sides() {
         PrometheusRemoteWriterConfig c = minimal();
         c.setLabelsCopy("-> instance");

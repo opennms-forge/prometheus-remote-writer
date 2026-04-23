@@ -109,6 +109,7 @@ public class PrometheusRemoteWriterConfig {
         }
         validateRenameTargets();
         validateCopyTargets();
+        validateCrossPrimitiveTargets();
         if (hasBasicAuth() && hasBearerAuth()) {
             throw new IllegalStateException(
                 "auth.basic.* and auth.bearer.token are mutually exclusive — "
@@ -210,12 +211,27 @@ public class PrometheusRemoteWriterConfig {
 
     /**
      * Shared collision check for {@code labels.rename} and {@code labels.copy}
-     * target validation. Returns a formatted error message if {@code to}
-     * collides with a default-allowlist label name or a reserved prefix;
-     * returns {@code null} when clean. A new collision rule added here applies
-     * uniformly to both primitives — which is the point.
+     * target validation. Returns a formatted error message if {@code to} is
+     * not a valid Prometheus label name, collides with a default-allowlist
+     * label name, or collides with a reserved prefix; returns {@code null}
+     * when clean. A new collision rule added here applies uniformly to both
+     * primitives — which is the point.
+     *
+     * <p>The sanitary check runs first because the downstream reserved-name
+     * and reserved-prefix checks compare literal strings: without the guard,
+     * a target like {@code foreign-source} would pass those checks (the raw
+     * string isn't in the reserved set) but at emit time
+     * {@link org.opennms.plugins.prometheus.remotewriter.sanitize.Sanitizer#labelName}
+     * would rewrite it to {@code foreign_source}, silently clobbering the
+     * default label.
      */
     private static String checkReservedCollision(String primitiveKey, String verbIng, String to) {
+        String sanitized = Sanitizer.labelName(to);
+        if (!sanitized.equals(to)) {
+            return primitiveKey + " target '" + to + "' is not a valid Prometheus label name "
+                + "(would be sanitized to '" + sanitized + "' at emit time). Rewrite it to match "
+                + "[a-zA-Z_][a-zA-Z0-9_]*.";
+        }
         if (LabelMapper.RESERVED_LABEL_NAMES.contains(to)) {
             return primitiveKey + " target '" + to + "' collides with the default label '" + to
                 + "'. The plugin already emits this label; " + verbIng + " onto it would silently "
@@ -255,7 +271,10 @@ public class PrometheusRemoteWriterConfig {
                 // or "a->b, ").
                 continue;
             }
-            String[] parts = trimmed.split("->");
+            // Use -1 limit so trailing '->' is preserved as a third empty
+            // part and rejected as malformed; default split() drops trailing
+            // empties and would silently parse "a->b->" as "a -> b".
+            String[] parts = trimmed.split("->", -1);
             if (parts.length != 2) {
                 throw new IllegalStateException(
                     "labels.rename entry must be 'from->to', got: " + pair);
@@ -295,7 +314,7 @@ public class PrometheusRemoteWriterConfig {
         for (String pair : labelsCopy.split(",")) {
             String trimmed = pair.trim();
             if (trimmed.isEmpty()) continue;
-            String[] parts = trimmed.split("->");
+            String[] parts = trimmed.split("->", -1);
             if (parts.length != 2) {
                 throw new IllegalStateException(
                     "labels.copy entry must be 'from->to', got: " + pair);
@@ -328,8 +347,6 @@ public class PrometheusRemoteWriterConfig {
     private void validateCopyTargets() {
         Map<String, List<String>> copyMap = labelsCopyMap();   // may throw on bad syntax
         if (copyMap.isEmpty()) return;
-        // Rename validation has already run; extract targets for cross-check.
-        Set<String> renameTargets = new HashSet<>(labelsRenameMap().values());
         List<String> errors = new ArrayList<>();
         Set<String> seenTargets = new HashSet<>();
         for (Map.Entry<String, List<String>> e : copyMap.entrySet()) {
@@ -337,12 +354,6 @@ public class PrometheusRemoteWriterConfig {
                 String reservedError = checkReservedCollision("labels.copy", "copying", to);
                 if (reservedError != null) {
                     errors.add(reservedError);
-                    continue;
-                }
-                if (renameTargets.contains(to)) {
-                    errors.add(
-                        "labels.copy target '" + to + "' also appears as a labels.rename target. "
-                        + "At most one of rename or copy can write a given label name.");
                     continue;
                 }
                 if (!seenTargets.add(to)) {
@@ -356,6 +367,37 @@ public class PrometheusRemoteWriterConfig {
             String suffix = errors.size() == 1 ? "" : "s";
             throw new IllegalStateException(
                 "labels.copy has " + errors.size() + " error" + suffix + ":\n  - "
+                + String.join("\n  - ", errors));
+        }
+    }
+
+    /**
+     * Reject any label name that appears as a target in BOTH {@code labels.rename}
+     * and {@code labels.copy}. Runs after the individual rename/copy validators —
+     * each primitive's own rules have already passed at this point — so the only
+     * remaining class of error is cross-primitive collision. The error wording is
+     * symmetric: it names the label, not a primitive, so operators can't
+     * accidentally think one primitive "owns" the collision.
+     */
+    private void validateCrossPrimitiveTargets() {
+        Map<String, String> renameMap = labelsRenameMap();
+        Map<String, List<String>> copyMap = labelsCopyMap();
+        if (renameMap.isEmpty() || copyMap.isEmpty()) return;
+        Set<String> renameTargets = new HashSet<>(renameMap.values());
+        List<String> errors = new ArrayList<>();
+        for (List<String> copyTargets : copyMap.values()) {
+            for (String to : copyTargets) {
+                if (renameTargets.contains(to)) {
+                    errors.add(
+                        "label '" + to + "' is the target of both a labels.rename "
+                        + "and a labels.copy. At most one primitive can write a given label name.");
+                }
+            }
+        }
+        if (!errors.isEmpty()) {
+            String suffix = errors.size() == 1 ? "" : "s";
+            throw new IllegalStateException(
+                "label pipeline has " + errors.size() + " cross-primitive error" + suffix + ":\n  - "
                 + String.join("\n  - ", errors));
         }
     }
