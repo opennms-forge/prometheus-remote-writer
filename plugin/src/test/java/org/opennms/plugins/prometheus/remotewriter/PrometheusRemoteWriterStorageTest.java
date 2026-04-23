@@ -26,6 +26,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ExecutionMode;
+import org.junit.jupiter.api.parallel.Isolated;
 import org.opennms.integration.api.v1.timeseries.Aggregation;
 import org.opennms.integration.api.v1.timeseries.StorageException;
 import org.opennms.integration.api.v1.timeseries.immutables.ImmutableMetric;
@@ -34,11 +35,14 @@ import org.opennms.plugins.prometheus.remotewriter.config.PrometheusRemoteWriter
 import org.opennms.plugins.prometheus.remotewriter.metrics.PluginMetrics;
 
 // Force sequential execution: several tests here share static state
-// (INSTANCE_ID_UNSET_WARNED, LAST_ACTIVE) that is intentionally JVM-scoped.
-// Parallel execution within this class would race the @BeforeEach reset
-// against a concurrent test's start(). Sequential today, immune to a
-// future project-wide parallel-tests switch.
+// (INSTANCE_ID_UNSET_WARNED, INSTANCE_ID_UNSET_WARN_COUNT, LAST_ACTIVE)
+// that is intentionally JVM-scoped. Parallel execution within this class
+// would race the @BeforeEach reset against a concurrent test's start().
+// @Isolated additionally locks against *other* test classes running in
+// parallel under a future project-wide parallel-tests switch — any other
+// class that touches the plugin storage would race the same static state.
 @Execution(ExecutionMode.SAME_THREAD)
+@Isolated
 class PrometheusRemoteWriterStorageTest {
 
     @BeforeEach

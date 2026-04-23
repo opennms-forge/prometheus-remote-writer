@@ -90,8 +90,14 @@ public class PrometheusRemoteWriterConfig {
     // constructor. Cache the parsed result once per underlying-string
     // lifecycle; setters invalidate. Parse errors stay uncached so each
     // call re-throws deterministically (see parse-error-idempotence tests).
-    private transient Map<String, String> cachedLabelsRenameMap;
-    private transient Map<String, List<String>> cachedLabelsCopyMap;
+    //
+    // `volatile` guards against reorderings if a future caller reads these
+    // concurrently with a setter (Blueprint hot-reload creates a new config
+    // bean rather than mutating an existing one, so today's access is
+    // effectively single-threaded — but the spec's SHALL language on "same
+    // instance" deserves an explicit memory-model barrier).
+    private transient volatile Map<String, String> cachedLabelsRenameMap;
+    private transient volatile Map<String, List<String>> cachedLabelsCopyMap;
 
     // --- Metadata passthrough ---
     private boolean      metadataEnabled;

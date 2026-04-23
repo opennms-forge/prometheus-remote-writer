@@ -12,6 +12,7 @@ package org.opennms.plugins.prometheus.remotewriter.config;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 
 import java.util.List;
 import java.util.Map;
@@ -600,13 +601,30 @@ class PrometheusRemoteWriterConfigTest {
     }
 
     @Test
-    void blank_setter_invalidates_and_yields_empty_map() {
+    void blank_rename_setter_invalidates_and_caches_empty_map() {
         PrometheusRemoteWriterConfig c = minimal();
         c.setLabelsRename("a -> b");
         assertThat(c.labelsRenameMap()).hasSize(1);
         c.setLabelsRename("   ");   // blank — normalises to null
-        assertThat(c.labelsRenameMap()).isEmpty();
-        assertThat(c.labelsCopyMap()).isEmpty();
+        Map<String, String> first = c.labelsRenameMap();
+        assertThat(first).isEmpty();
+        // Reference identity must also hold for the blank case — both calls
+        // return the SAME cached instance, not a fresh `Collections.emptyMap()`
+        // each time. Without this assertion, the invariant would pass
+        // accidentally via the `emptyMap()` singleton rather than via the
+        // memoization path.
+        assertThat(c.labelsRenameMap()).isSameAs(first);
+    }
+
+    @Test
+    void blank_copy_setter_invalidates_and_caches_empty_map() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("node -> instance");
+        assertThat(c.labelsCopyMap()).hasSize(1);
+        c.setLabelsCopy("   ");
+        Map<String, List<String>> first = c.labelsCopyMap();
+        assertThat(first).isEmpty();
+        assertThat(c.labelsCopyMap()).isSameAs(first);
     }
 
     @Test
@@ -614,42 +632,49 @@ class PrometheusRemoteWriterConfigTest {
         // A malformed directive must throw on every call with the same
         // underlying string — no stale cached null, no silently-succeeding
         // second attempt. Parse errors are deliberately NOT memoised; this
-        // test pins the "re-parse, re-throw" contract.
+        // test pins the "re-parse, re-throw" contract AND that the error
+        // message itself is stable across calls (a substring match alone
+        // would let the parser return different messages between calls
+        // without the test noticing).
         PrometheusRemoteWriterConfig c = minimal();
         c.setLabelsRename("oops");
-        assertThatThrownBy(c::labelsRenameMap)
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("from->to");
-        assertThatThrownBy(c::labelsRenameMap)
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("from->to");
+        Throwable first = catchThrowable(c::labelsRenameMap);
+        Throwable second = catchThrowable(c::labelsRenameMap);
+        assertThat(first).isInstanceOf(IllegalStateException.class)
+                         .hasMessageContaining("from->to");
+        assertThat(second).isInstanceOf(IllegalStateException.class);
+        assertThat(second.getMessage()).isEqualTo(first.getMessage());
     }
 
     @Test
     void copy_parse_error_is_idempotent_across_repeated_calls() {
         PrometheusRemoteWriterConfig c = minimal();
         c.setLabelsCopy("oops");
-        assertThatThrownBy(c::labelsCopyMap)
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("from->to");
-        assertThatThrownBy(c::labelsCopyMap)
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("from->to");
+        Throwable first = catchThrowable(c::labelsCopyMap);
+        Throwable second = catchThrowable(c::labelsCopyMap);
+        assertThat(first).isInstanceOf(IllegalStateException.class)
+                         .hasMessageContaining("from->to");
+        assertThat(second).isInstanceOf(IllegalStateException.class);
+        assertThat(second.getMessage()).isEqualTo(first.getMessage());
     }
 
     @Test
-    void validate_parses_rename_and_copy_maps_exactly_once_each() {
-        // validate() triggers up to four parse points — two sub-validators
-        // for rename plus the cross-primitive validator, and two for copy
-        // plus the constructor's call in LabelMapper. The cache means each
-        // accessor returns the same instance to every caller.
+    void validate_returns_cached_maps_to_all_three_subvalidators() {
+        // validate() invokes labelsRenameMap() via validateRenameTargets and
+        // validateCrossPrimitiveTargets, and labelsCopyMap() via
+        // validateCopyTargets and validateCrossPrimitiveTargets. The cache
+        // means each accessor returns the same instance to every caller —
+        // this test pins that "first call primes the cache, subsequent calls
+        // hit it" invariant across the validate() boundary. Name preferred
+        // over "exactly once" since this test asserts identity of returned
+        // maps, not parse-invocation count.
         PrometheusRemoteWriterConfig c = minimal();
         c.setLabelsRename("a -> b");
         c.setLabelsCopy("node -> instance");
         // Prime the cache by calling both once.
         Map<String, String> renameA = c.labelsRenameMap();
         Map<String, List<String>> copyA = c.labelsCopyMap();
-        c.validate();   // runs the three validators
+        c.validate();
         // Post-validate, calls still hit the same cached instance.
         assertThat(c.labelsRenameMap()).isSameAs(renameA);
         assertThat(c.labelsCopyMap()).isSameAs(copyA);

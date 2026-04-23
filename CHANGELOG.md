@@ -9,7 +9,7 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- **Internal**: `PrometheusRemoteWriterConfig.labelsRenameMap()` and `labelsCopyMap()` now cache their parsed result, returning the same `Map` instance across repeated calls within one config-string lifecycle. Setters invalidate. Operator-invisible; `validate()` no longer re-parses the same string three times per invocation.
+- **Internal**: `PrometheusRemoteWriterConfig.labelsRenameMap()` and `labelsCopyMap()` now cache their parsed result, returning the same `Map` instance across repeated calls within one config-string lifecycle. Setters invalidate. `validate()` no longer re-parses the same string three times per invocation. The returned maps continue to be unmodifiable (as before); the behavior change is strictly tighter — same content, stable identity.
 
 ### Tests
 
