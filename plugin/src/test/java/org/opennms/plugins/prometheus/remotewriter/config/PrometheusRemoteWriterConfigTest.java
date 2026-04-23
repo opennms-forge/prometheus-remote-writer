@@ -455,6 +455,193 @@ class PrometheusRemoteWriterConfigTest {
         assertThat(minimal().diff(minimal())).isEmpty();
     }
 
+    // ---------- labels.copy -------------------------------------------------
+
+    @Test
+    void copy_map_is_empty_when_unset() {
+        assertThat(minimal().labelsCopyMap()).isEmpty();
+    }
+
+    @Test
+    void copy_map_parses_single_entry() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("node -> instance");
+        assertThat(c.labelsCopyMap()).containsExactly(
+            Map.entry("node", List.of("instance")));
+    }
+
+    @Test
+    void copy_map_parses_multiple_entries_with_whitespace() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("node->instance, foreign_source -> tenant ,  ");
+        assertThat(c.labelsCopyMap()).containsExactly(
+            Map.entry("node", List.of("instance")),
+            Map.entry("foreign_source", List.of("tenant")));
+    }
+
+    @Test
+    void copy_map_preserves_multiple_targets_from_same_source() {
+        // Unlike labels.rename, two copies with the same 'from' are allowed:
+        // `node -> instance, node -> host` emits both instance and host.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("node -> instance, node -> host");
+        assertThat(c.labelsCopyMap()).containsExactly(
+            Map.entry("node", List.of("instance", "host")));
+    }
+
+    @Test
+    void copy_map_rejects_malformed_entry() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("oops");
+        assertThatThrownBy(c::labelsCopyMap)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("from->to");
+    }
+
+    @Test
+    void copy_map_rejects_trailing_arrow() {
+        // `a->b->` used to split to length 2 because Java's default split
+        // drops trailing empty strings, silently parsing as `a -> b`. With
+        // the -1 limit, the trailing arrow produces a third empty part and
+        // the entry is rejected as malformed.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("a->b->");
+        assertThatThrownBy(c::labelsCopyMap)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("from->to");
+    }
+
+    @Test
+    void rename_map_rejects_trailing_arrow() {
+        // Same silent-truncation bug lived in labels.rename too; same fix.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsRename("a->b->");
+        assertThatThrownBy(c::labelsRenameMap)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("from->to");
+    }
+
+    @Test
+    void copy_target_with_invalid_prometheus_grammar_is_rejected() {
+        // `foreign-source` is not a valid Prometheus label name; at emit time
+        // the Sanitizer would rewrite it to `foreign_source`, silently
+        // clobbering the default label. Reject at startup with an explicit
+        // "not a valid Prometheus label name" message so operators fix the
+        // source of the problem rather than seeing a downstream reserved-name
+        // error after renaming.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("x -> foreign-source");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.copy")
+            .hasMessageContaining("'foreign-source'")
+            .hasMessageContaining("not a valid Prometheus label name")
+            .hasMessageContaining("'foreign_source'");   // sanitized form shown as hint
+    }
+
+    @Test
+    void rename_target_with_invalid_prometheus_grammar_is_rejected() {
+        // Same sanitary guard applies to labels.rename — previously the raw
+        // string could pass the reserved-name check even if its sanitized
+        // form collided.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsRename("node -> foreign-source");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.rename")
+            .hasMessageContaining("'foreign-source'")
+            .hasMessageContaining("not a valid Prometheus label name");
+    }
+
+    @Test
+    void copy_two_raw_targets_that_sanitize_to_same_name_are_rejected_individually() {
+        // `foo-bar` and `foo_bar` both sanitize to `foo_bar`. Previously both
+        // would pass the raw-string duplicate-target check and the second
+        // would silently overwrite the first at emit. Now each hits the
+        // grammar rejection on its own line (foo-bar has the hyphen,
+        // foo_bar is valid but is caught as duplicate only after one of
+        // them is corrected).
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("a -> foo-bar, b -> foo_bar");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("'foo-bar'")
+            .hasMessageContaining("not a valid Prometheus label name");
+    }
+
+    @Test
+    void copy_map_rejects_empty_sides() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("-> instance");
+        assertThatThrownBy(c::labelsCopyMap)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("empty side");
+    }
+
+    @Test
+    void copy_to_non_reserved_name_validates() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("node -> instance, foreign_source -> tenant");
+        assertThatCode(c::validate).doesNotThrowAnyException();
+    }
+
+    @Test
+    void copy_target_collides_with_default_label_is_rejected() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("node -> foreign_source");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.copy")
+            .hasMessageContaining("foreign_source")
+            .hasMessageContaining("default label");
+    }
+
+    @Test
+    void copy_target_with_reserved_prefix_is_rejected() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("foo -> onms_cat_router");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.copy")
+            .hasMessageContaining("onms_cat_")
+            .hasMessageContaining("surveillance categories");
+    }
+
+    @Test
+    void copy_duplicate_target_across_entries_is_rejected() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("node -> cluster, foreign_source -> cluster");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.copy")
+            .hasMessageContaining("'cluster'")
+            .hasMessageContaining("same target");
+    }
+
+    @Test
+    void copy_target_collides_with_rename_target_is_rejected() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsRename("node -> instance");
+        c.setLabelsCopy("foreign_source -> instance");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.copy")
+            .hasMessageContaining("'instance'")
+            .hasMessageContaining("labels.rename");
+    }
+
+    @Test
+    void copy_multiple_errors_are_accumulated_into_one_message() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("a -> node, b -> onms_cat_x, c -> cluster, d -> cluster");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.copy has 3 error")
+            .hasMessageContaining("'node'")
+            .hasMessageContaining("onms_cat_")
+            .hasMessageContaining("'cluster'");
+    }
+
     // ---------- helpers -----------------------------------------------------
 
     private static PrometheusRemoteWriterConfig minimal() {

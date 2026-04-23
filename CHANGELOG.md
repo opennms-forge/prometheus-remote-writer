@@ -7,6 +7,62 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] — TBD
+
+### Added
+
+- **`labels.copy` primitive** — a new `labels.*` configuration key that emits
+  the value of an existing label under an additional name, leaving both
+  present on the wire. Solves dashboard-portability scenarios
+  (`labels.copy = node -> instance` to bridge OpenNMS-native and
+  Prometheus-idiomatic vocabulary), migration-period dual emission
+  (emit old + new name for a release cycle, then drop), and integration with
+  systems that hardcode label names (multi-tenant Mimir's `tenant` label,
+  vendor alert bundles, Grafana folder conventions).
+
+  Config syntax mirrors `labels.rename` — a comma-separated list of
+  `from -> to` pairs — with one difference: the same `from` key may appear
+  with multiple targets (`labels.copy = node -> instance, node -> host`)
+  to emit all named copies.
+
+  Pipeline position: between `labels.include` and `labels.rename`
+  (`defaults → exclude → include → copy → rename → metadata`). Copy is
+  one-pass (snapshots source values at stage entry; `copy = a -> b, b -> c`
+  does NOT produce `c`) and operates on pre-rename names.
+
+  Validation: copy targets must not collide with default-allowlist labels,
+  reserved prefixes (`onms_cat_*`, `onms_meta_*`), another copy target, or a
+  `labels.rename` target. Unknown copy sources are logged once at startup
+  and treated as per-sample no-ops thereafter.
+
+- **`rename`/`copy` target-validation sharing** — the reserved-name and
+  reserved-prefix checks are now centralised in a single helper. A new
+  collision rule added to one primitive applies uniformly to the other.
+
+### Known limitations
+
+- **`labels.copy` is the last mapping primitive.** Further transformations —
+  regex extraction, case conversion, conditional emission, value rewriting —
+  belong on the backend via Prometheus / Mimir `relabel_config`, not in this
+  plugin. This is a deliberate scope commitment: the plugin is a simple
+  remote-write sender, and the ecosystem has better tools for the heavier
+  transformations downstream.
+- **Glob support on the copy source** (e.g., `onms_cat_* -> cat_*`) is not
+  supported in v0.3. Worth reconsidering in a future release if real demand
+  materialises; adds validation complexity that v0.3 does not need.
+
+### Upgrade notes
+
+- **Purely additive.** Deployments that do not set `labels.copy` see no
+  behavior change. The internal refactor that shares validation code between
+  `labels.rename` and `labels.copy` is operator-invisible.
+- **Wire cost.** Each copy directive adds ~20-50 bytes per sample. Typical
+  deployments configuring one or two copies see <1% write-traffic increase.
+- **Cardinality shift.** Turning a copy on once changes series identity
+  (Prometheus identifies series by the full label-value set), replacing the
+  pre-copy series with post-copy series of the same count. No ongoing
+  cardinality growth.
+
 ## [0.2.0] — TBD
 
 ### Breaking changes
@@ -231,6 +287,7 @@ Go sanitization rules.
 - Karaf feature `prometheus-remote-writer` shipping a pre-populated
   `etc/org.opennms.plugins.tss.prometheusremotewriter.cfg` on install.
 
-[Unreleased]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/releases/tag/v0.1.0

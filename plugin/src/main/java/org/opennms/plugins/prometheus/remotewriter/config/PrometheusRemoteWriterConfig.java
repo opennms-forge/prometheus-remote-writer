@@ -81,6 +81,7 @@ public class PrometheusRemoteWriterConfig {
     private String labelsInclude;
     private String labelsExclude;
     private String labelsRename;
+    private String labelsCopy;
     private String metricPrefix;
 
     // --- Metadata passthrough ---
@@ -107,6 +108,8 @@ public class PrometheusRemoteWriterConfig {
                 + "etc/org.opennms.plugins.tss.prometheusremotewriter.cfg");
         }
         validateRenameTargets();
+        validateCopyTargets();
+        validateCrossPrimitiveTargets();
         if (hasBasicAuth() && hasBearerAuth()) {
             throw new IllegalStateException(
                 "auth.basic.* and auth.bearer.token are mutually exclusive — "
@@ -187,27 +190,11 @@ public class PrometheusRemoteWriterConfig {
         Set<String> seenTargets = new HashSet<>();
         for (Map.Entry<String, String> e : renameMap.entrySet()) {
             String to = e.getValue();
-            if (LabelMapper.RESERVED_LABEL_NAMES.contains(to)) {
-                errors.add(
-                    "labels.rename target '" + to + "' collides with the default label '" + to
-                    + "'. The plugin already emits this label; renaming onto it would silently "
-                    + "clobber the default value. Pick a different 'to' name.");
+            String reservedError = checkReservedCollision("labels.rename", "renaming", to);
+            if (reservedError != null) {
+                errors.add(reservedError);
                 continue;
             }
-            boolean prefixCollision = false;
-            for (String prefix : LabelMapper.RESERVED_LABEL_PREFIXES) {
-                if (to.startsWith(prefix)) {
-                    String reason = prefix.equals("onms_cat_")
-                            ? "surveillance categories"
-                            : "metadata passthrough";
-                    errors.add(
-                        "labels.rename target '" + to + "' collides with the reserved prefix '"
-                        + prefix + "*' (" + reason + "). Pick a different 'to' name.");
-                    prefixCollision = true;
-                    break;
-                }
-            }
-            if (prefixCollision) continue;
             if (!seenTargets.add(to)) {
                 errors.add(
                     "labels.rename has two entries with the same target '" + to
@@ -220,6 +207,46 @@ public class PrometheusRemoteWriterConfig {
                 "labels.rename has " + errors.size() + " error" + suffix + ":\n  - "
                 + String.join("\n  - ", errors));
         }
+    }
+
+    /**
+     * Shared collision check for {@code labels.rename} and {@code labels.copy}
+     * target validation. Returns a formatted error message if {@code to} is
+     * not a valid Prometheus label name, collides with a default-allowlist
+     * label name, or collides with a reserved prefix; returns {@code null}
+     * when clean. A new collision rule added here applies uniformly to both
+     * primitives — which is the point.
+     *
+     * <p>The sanitary check runs first because the downstream reserved-name
+     * and reserved-prefix checks compare literal strings: without the guard,
+     * a target like {@code foreign-source} would pass those checks (the raw
+     * string isn't in the reserved set) but at emit time
+     * {@link org.opennms.plugins.prometheus.remotewriter.sanitize.Sanitizer#labelName}
+     * would rewrite it to {@code foreign_source}, silently clobbering the
+     * default label.
+     */
+    private static String checkReservedCollision(String primitiveKey, String verbIng, String to) {
+        String sanitized = Sanitizer.labelName(to);
+        if (!sanitized.equals(to)) {
+            return primitiveKey + " target '" + to + "' is not a valid Prometheus label name "
+                + "(would be sanitized to '" + sanitized + "' at emit time). Rewrite it to match "
+                + "[a-zA-Z_][a-zA-Z0-9_]*.";
+        }
+        if (LabelMapper.RESERVED_LABEL_NAMES.contains(to)) {
+            return primitiveKey + " target '" + to + "' collides with the default label '" + to
+                + "'. The plugin already emits this label; " + verbIng + " onto it would silently "
+                + "clobber the default value. Pick a different 'to' name.";
+        }
+        for (String prefix : LabelMapper.RESERVED_LABEL_PREFIXES) {
+            if (to.startsWith(prefix)) {
+                String reason = prefix.equals("onms_cat_")
+                        ? "surveillance categories"
+                        : "metadata passthrough";
+                return primitiveKey + " target '" + to + "' collides with the reserved prefix '"
+                    + prefix + "*' (" + reason + "). Pick a different 'to' name.";
+            }
+        }
+        return null;
     }
 
     public boolean hasBasicAuth()  { return !isBlank(basicUsername) || !isBlank(basicPassword); }
@@ -244,7 +271,10 @@ public class PrometheusRemoteWriterConfig {
                 // or "a->b, ").
                 continue;
             }
-            String[] parts = trimmed.split("->");
+            // Use -1 limit so trailing '->' is preserved as a third empty
+            // part and rejected as malformed; default split() drops trailing
+            // empties and would silently parse "a->b->" as "a -> b".
+            String[] parts = trimmed.split("->", -1);
             if (parts.length != 2) {
                 throw new IllegalStateException(
                     "labels.rename entry must be 'from->to', got: " + pair);
@@ -267,6 +297,109 @@ public class PrometheusRemoteWriterConfig {
             out.put(from, to);
         }
         return Collections.unmodifiableMap(out);
+    }
+
+    /**
+     * Copies parsed as a {@code { from -> [to1, to2, ...] }} multimap; order
+     * preserved. Unlike {@code labels.rename}, multiple copy directives with
+     * the same {@code from} key are permitted — {@code labels.copy = node ->
+     * instance, node -> host} emits both {@code instance} and {@code host}
+     * with {@code node}'s value.
+     */
+    public Map<String, List<String>> labelsCopyMap() {
+        if (isBlank(labelsCopy)) {
+            return Collections.emptyMap();
+        }
+        Map<String, List<String>> out = new LinkedHashMap<>();
+        for (String pair : labelsCopy.split(",")) {
+            String trimmed = pair.trim();
+            if (trimmed.isEmpty()) continue;
+            String[] parts = trimmed.split("->", -1);
+            if (parts.length != 2) {
+                throw new IllegalStateException(
+                    "labels.copy entry must be 'from->to', got: " + pair);
+            }
+            String from = parts[0].trim();
+            String to   = parts[1].trim();
+            if (from.isEmpty() || to.isEmpty()) {
+                throw new IllegalStateException(
+                    "labels.copy entry has empty side: " + pair);
+            }
+            out.computeIfAbsent(from, k -> new ArrayList<>()).add(to);
+        }
+        Map<String, List<String>> immutable = new LinkedHashMap<>(out.size());
+        for (Map.Entry<String, List<String>> e : out.entrySet()) {
+            immutable.put(e.getKey(), Collections.unmodifiableList(e.getValue()));
+        }
+        return Collections.unmodifiableMap(immutable);
+    }
+
+    /**
+     * Reject {@code labels.copy} entries whose {@code to} target would silently
+     * clobber a default-allowlist label at flush time, duplicate another
+     * copy's target, or collide with a {@code labels.rename} target.
+     *
+     * <p>Mirrors the structure of {@link #validateRenameTargets()} — same
+     * reserved exact set, same reserved prefix list — with one additional
+     * cross-primitive check against rename targets so operators can't have two
+     * writers contending for the same label name.
+     */
+    private void validateCopyTargets() {
+        Map<String, List<String>> copyMap = labelsCopyMap();   // may throw on bad syntax
+        if (copyMap.isEmpty()) return;
+        List<String> errors = new ArrayList<>();
+        Set<String> seenTargets = new HashSet<>();
+        for (Map.Entry<String, List<String>> e : copyMap.entrySet()) {
+            for (String to : e.getValue()) {
+                String reservedError = checkReservedCollision("labels.copy", "copying", to);
+                if (reservedError != null) {
+                    errors.add(reservedError);
+                    continue;
+                }
+                if (!seenTargets.add(to)) {
+                    errors.add(
+                        "labels.copy has two entries with the same target '" + to
+                        + "'. At most one copy can target a given label name.");
+                }
+            }
+        }
+        if (!errors.isEmpty()) {
+            String suffix = errors.size() == 1 ? "" : "s";
+            throw new IllegalStateException(
+                "labels.copy has " + errors.size() + " error" + suffix + ":\n  - "
+                + String.join("\n  - ", errors));
+        }
+    }
+
+    /**
+     * Reject any label name that appears as a target in BOTH {@code labels.rename}
+     * and {@code labels.copy}. Runs after the individual rename/copy validators —
+     * each primitive's own rules have already passed at this point — so the only
+     * remaining class of error is cross-primitive collision. The error wording is
+     * symmetric: it names the label, not a primitive, so operators can't
+     * accidentally think one primitive "owns" the collision.
+     */
+    private void validateCrossPrimitiveTargets() {
+        Map<String, String> renameMap = labelsRenameMap();
+        Map<String, List<String>> copyMap = labelsCopyMap();
+        if (renameMap.isEmpty() || copyMap.isEmpty()) return;
+        Set<String> renameTargets = new HashSet<>(renameMap.values());
+        List<String> errors = new ArrayList<>();
+        for (List<String> copyTargets : copyMap.values()) {
+            for (String to : copyTargets) {
+                if (renameTargets.contains(to)) {
+                    errors.add(
+                        "label '" + to + "' is the target of both a labels.rename "
+                        + "and a labels.copy. At most one primitive can write a given label name.");
+                }
+            }
+        }
+        if (!errors.isEmpty()) {
+            String suffix = errors.size() == 1 ? "" : "s";
+            throw new IllegalStateException(
+                "label pipeline has " + errors.size() + " cross-primitive error" + suffix + ":\n  - "
+                + String.join("\n  - ", errors));
+        }
     }
 
     /**
@@ -303,6 +436,7 @@ public class PrometheusRemoteWriterConfig {
         diffStr(out, "labels.include",            other.labelsInclude,         labelsInclude);
         diffStr(out, "labels.exclude",            other.labelsExclude,         labelsExclude);
         diffStr(out, "labels.rename",             other.labelsRename,          labelsRename);
+        diffStr(out, "labels.copy",               other.labelsCopy,            labelsCopy);
         diffStr(out, "metric.prefix",             other.metricPrefix,          metricPrefix);
         diffBool(out, "metadata.enabled",         other.metadataEnabled,       metadataEnabled);
         diffStr(out, "metadata.include",          other.metadataInclude,       metadataInclude);
@@ -338,6 +472,7 @@ public class PrometheusRemoteWriterConfig {
     public void setLabelsInclude(String v)         { labelsInclude = blankToNull(v); }
     public void setLabelsExclude(String v)         { labelsExclude = blankToNull(v); }
     public void setLabelsRename(String v)          { labelsRename = blankToNull(v); }
+    public void setLabelsCopy(String v)            { labelsCopy = blankToNull(v); }
     public void setMetricPrefix(String v)          { metricPrefix = blankToNull(v); }
     public void setMetadataEnabled(boolean v)      { metadataEnabled = v; }
     public void setMetadataInclude(String v)       { metadataInclude = blankToNull(v); }
@@ -397,6 +532,7 @@ public class PrometheusRemoteWriterConfig {
     public String  getLabelsInclude()         { return labelsInclude; }
     public String  getLabelsExclude()         { return labelsExclude; }
     public String  getLabelsRename()          { return labelsRename; }
+    public String  getLabelsCopy()            { return labelsCopy; }
     public String  getMetricPrefix()          { return metricPrefix; }
     public boolean isMetadataEnabled()        { return metadataEnabled; }
     public String  getMetadataInclude()       { return metadataInclude; }

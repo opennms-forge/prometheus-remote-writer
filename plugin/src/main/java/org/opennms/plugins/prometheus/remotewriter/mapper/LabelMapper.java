@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 
 import org.opennms.integration.api.v1.timeseries.IntrinsicTagNames;
@@ -25,6 +26,8 @@ import org.opennms.integration.api.v1.timeseries.Tag;
 import org.opennms.plugins.prometheus.remotewriter.config.PrometheusRemoteWriterConfig;
 import org.opennms.plugins.prometheus.remotewriter.sanitize.Sanitizer;
 import org.opennms.plugins.prometheus.remotewriter.wire.MappedSample;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Turns an OpenNMS {@link Sample} into a {@link MappedSample} with the
@@ -93,21 +96,55 @@ public final class LabelMapper {
             "onms_cat_",
             "onms_meta_");
 
+    private static final Logger LOG = LoggerFactory.getLogger(LabelMapper.class);
+
     private final List<Pattern> excludeGlobs;
     private final List<Pattern> includeGlobs;
     private final Map<String, String> renameMap;
+    private final Map<String, List<String>> copyMap;
     private final String metricPrefix;
     private final String instanceId;
     private final MetadataProcessor metadataProcessor;
+    /** One-shot WARN gate for unknown labels.copy sources. Entry is added the
+     *  first time a source is observed missing (or empty-valued) at copy
+     *  time; subsequent occurrences on the same source are silent.
+     *  Set-per-instance matches the bundle-lifecycle scope described in the
+     *  README. */
+    private final Set<String> warnedUnknownCopySources = ConcurrentHashMap.newKeySet();
+    /** One-shot WARN gate for labels.copy targets that already exist in the
+     *  labels map at copy time (typically because labels.include surfaced a
+     *  source tag whose snake-cased name collides with the copy target).
+     *  Startup validation catches known collisions against default labels,
+     *  reserved prefixes, rename targets, and other copy targets — but
+     *  labels.include's source-tag globs are operator-defined and their
+     *  resolved snake-cased label names aren't known until a sample flows
+     *  through, so runtime detection is the only practical guard. */
+    private final Set<String> warnedCopyTargetClobbers = ConcurrentHashMap.newKeySet();
 
     public LabelMapper(PrometheusRemoteWriterConfig config) {
         Objects.requireNonNull(config, "config");
         this.excludeGlobs      = compileGlobs(config.labelsExcludeGlobs());
         this.includeGlobs      = compileGlobs(config.labelsIncludeGlobs());
         this.renameMap         = config.labelsRenameMap();
+        this.copyMap           = config.labelsCopyMap();
         this.metricPrefix      = config.getMetricPrefix();
         this.instanceId        = config.getInstanceId();
         this.metadataProcessor = new MetadataProcessor(config);
+    }
+
+    /** Visible for tests — unmodifiable view of labels.copy sources that
+     *  have WARN-emitted via the unknown-source gate on this mapper instance.
+     *  Lets tests assert the "exactly one WARN" semantic without depending on
+     *  a log-capture framework. */
+    Set<String> warnedUnknownCopySourcesForTesting() {
+        return java.util.Collections.unmodifiableSet(warnedUnknownCopySources);
+    }
+
+    /** Visible for tests — unmodifiable view of labels.copy targets that
+     *  have WARN-emitted via the runtime-clobber gate on this mapper
+     *  instance. */
+    Set<String> warnedCopyTargetClobbersForTesting() {
+        return java.util.Collections.unmodifiableSet(warnedCopyTargetClobbers);
     }
 
     public long getMetadataDenylistBlockedCount() {
@@ -139,6 +176,7 @@ public final class LabelMapper {
         Map<String, String> labels = new LinkedHashMap<>(defaults.labels());
         labels = applyExclude(labels, excludeGlobs);
         labels = applyInclude(labels, sourceTags, includeGlobs, defaults.consumedSourceKeys());
+        labels = applyCopy(labels, copyMap, warnedUnknownCopySources, warnedCopyTargetClobbers);
         labels = applyRename(labels, renameMap);
         // Metadata passthrough runs last so its prefix-namespaced labels are
         // not renamed or excluded by labels.* rules; the default allowlist
@@ -285,6 +323,28 @@ public final class LabelMapper {
         return out;
     }
 
+    /**
+     * Rename is internally equivalent to a copy-then-drop operation on the
+     * same source: the renamed key is emitted under the new name, the old
+     * name is removed, and the value is preserved. This equivalence is
+     * scoped INSIDE rename — the plugin's {@code labels.exclude} config runs
+     * as an earlier pipeline stage (before {@link #applyInclude} and
+     * {@link #applyCopy}), so an operator writing
+     * {@code labels.copy = node -> cluster, labels.exclude = node} does NOT
+     * recreate rename's behavior: the external exclude drops {@code node}
+     * before copy can read it. Rename is the only way to get "one label
+     * replaces another" semantics at the config surface.
+     *
+     * <p>We deliberately do NOT express rename as a literal call to
+     * {@link #applyCopy} plus an exclude pass: that would shift the renamed
+     * key to the tail of the iteration order, whereas walking the input map
+     * in place preserves insertion position. Label iteration order is not
+     * part of the wire protocol (Prometheus Remote Write sorts labels
+     * alphabetically before serialization), but it IS observed by unit tests.
+     *
+     * <p>If a new rule is added to rename's target validation, mirror it in
+     * {@code validateCopyTargets()} — and vice versa.
+     */
     private static Map<String, String> applyRename(Map<String, String> labels, Map<String, String> renameMap) {
         if (renameMap.isEmpty()) return labels;
         Map<String, String> out = new LinkedHashMap<>(labels.size());
@@ -295,6 +355,61 @@ public final class LabelMapper {
                 name = Sanitizer.labelName(renamed);
             }
             out.put(name, e.getValue());
+        }
+        return out;
+    }
+
+    /**
+     * Emit a copy of each listed source label under an additional name. Runs
+     * after include, before rename; sees pre-rename label names.
+     *
+     * <p>One-pass semantics: source lookups read from {@code labels} (the input
+     * map is never mutated), so a chain like {@code copy = node -> a, a -> b}
+     * does NOT produce {@code b} — at lookup time {@code a} doesn't exist yet
+     * in {@code labels}, only in the separate {@code out} map we're building.
+     *
+     * <p>Empty-valued sources are treated the same as absent sources: skipped
+     * with a one-shot WARN. Prometheus treats empty-valued labels as absent at
+     * query time, so copying an empty value would produce a label the backend
+     * promptly ignores — the operator's intent was almost certainly something
+     * else.
+     *
+     * <p>Targets that already exist in {@code labels} at copy time (typically
+     * because {@code labels.include} surfaced a source tag whose snake-cased
+     * name happens to equal the copy target) are overwritten, with a one-shot
+     * WARN naming the target so operators can spot the silent clobber.
+     *
+     * <p>Copy targets are trusted to be valid Prometheus label names —
+     * {@code PrometheusRemoteWriterConfig.validate()} rejects targets whose
+     * sanitized form differs from the raw, so at runtime we can write the
+     * target string directly without re-sanitizing.
+     */
+    private static Map<String, String> applyCopy(Map<String, String> labels,
+                                                 Map<String, List<String>> copyMap,
+                                                 Set<String> warnedSources,
+                                                 Set<String> warnedClobbers) {
+        if (copyMap.isEmpty()) return labels;
+        Map<String, String> out = new LinkedHashMap<>(labels);
+        for (Map.Entry<String, List<String>> e : copyMap.entrySet()) {
+            String from = e.getKey();
+            String value = labels.get(from);
+            if (value == null || value.isEmpty()) {
+                if (warnedSources.add(from)) {
+                    LOG.warn("labels.copy source '{}' has no value at copy time "
+                            + "(absent or empty); directive is a no-op for samples "
+                            + "without that label", from);
+                }
+                continue;
+            }
+            for (String target : e.getValue()) {
+                if (out.containsKey(target) && warnedClobbers.add(target)) {
+                    LOG.warn("labels.copy target '{}' already exists in the emitted "
+                            + "label set (likely surfaced by labels.include); "
+                            + "overwriting. Pick a different target name or narrow "
+                            + "the include glob.", target);
+                }
+                out.put(target, value);
+            }
         }
         return out;
     }

@@ -326,4 +326,132 @@ class PrometheusRemoteWriteIT {
                 "node", "foreign_source", "foreign_id", "node_label", "location",
                 "if_name", "if_descr", "if_speed", "onms_cat_Routers");
     }
+
+    @Test
+    void labels_copy_emits_second_label_that_round_trips() throws Exception {
+        // labels.copy = node -> instance: the same value is emitted under
+        // two label names. Prometheus stores both; findMetrics surfaces both
+        // as meta tags with equal values.
+        storage.stop();
+        PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+        String base = "http://" + prometheus.getHost() + ":" + prometheus.getMappedPort(9090);
+        c.setWriteUrl(base + "/api/v1/write");
+        c.setReadUrl(base);
+        c.setLabelsCopy("node -> instance");
+        c.setBatchSize(10);
+        c.setFlushIntervalMs(100);
+        c.setRetryInitialBackoffMs(100);
+        c.setRetryMaxBackoffMs(500);
+        c.setRetryMaxAttempts(10);
+        c.setShutdownGracePeriodMs(2_000);
+        storage = new PrometheusRemoteWriterStorage(c);
+        storage.start();
+
+        Instant now = Instant.now();
+        String metricName = "onms_it_copy_" + System.nanoTime();
+        Sample sample = ImmutableSample.builder()
+                .metric(ImmutableMetric.builder()
+                        .intrinsicTag("name", metricName)
+                        .intrinsicTag("resourceId", "nodeSource[NOC:it-copy].interfaceSnmp[eth0]")
+                        .externalTag("foreignSource", "NOC")
+                        .externalTag("foreignId", "it-copy")
+                        .build())
+                .time(now)
+                .value(1.0)
+                .build();
+
+        storage.store(List.of(sample));
+
+        PluginMetrics m = storage.getMetrics();
+        await().atMost(Duration.ofSeconds(20))
+               .until(() -> m.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue() >= 1L);
+
+        TagMatcher nameMatcher = ImmutableTagMatcher.builder()
+                .type(TagMatcher.Type.EQUALS)
+                .key("name")
+                .value(metricName)
+                .build();
+
+        List<Metric> found = await().atMost(Duration.ofSeconds(20))
+                .until(() -> storage.findMetrics(List.of(nameMatcher)),
+                       list -> !list.isEmpty());
+        assertThat(found).hasSize(1);
+
+        var tags = found.get(0).getMetaTags();
+        assertThat(tags).anySatisfy(t -> {
+            assertThat(t.getKey()).isEqualTo("node");
+            assertThat(t.getValue()).isEqualTo("NOC:it-copy");
+        });
+        assertThat(tags).anySatisfy(t -> {
+            assertThat(t.getKey()).isEqualTo("instance");
+            assertThat(t.getValue()).isEqualTo("NOC:it-copy");
+        });
+    }
+
+    @Test
+    void labels_copy_combined_with_rename_emits_both_renamed_and_copied_labels() throws Exception {
+        // labels.copy = node -> instance AND labels.rename = node -> host:
+        // copy runs first on pre-rename `node`, rename then moves `node` to
+        // `host`. Both `host` and `instance` reach Prometheus with the same
+        // node value; `node` itself is gone.
+        storage.stop();
+        PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+        String base = "http://" + prometheus.getHost() + ":" + prometheus.getMappedPort(9090);
+        c.setWriteUrl(base + "/api/v1/write");
+        c.setReadUrl(base);
+        c.setLabelsCopy("node -> instance");
+        c.setLabelsRename("node -> host");
+        c.setBatchSize(10);
+        c.setFlushIntervalMs(100);
+        c.setRetryInitialBackoffMs(100);
+        c.setRetryMaxBackoffMs(500);
+        c.setRetryMaxAttempts(10);
+        c.setShutdownGracePeriodMs(2_000);
+        storage = new PrometheusRemoteWriterStorage(c);
+        storage.start();
+
+        Instant now = Instant.now();
+        String metricName = "onms_it_copyrename_" + System.nanoTime();
+        Sample sample = ImmutableSample.builder()
+                .metric(ImmutableMetric.builder()
+                        .intrinsicTag("name", metricName)
+                        .intrinsicTag("resourceId", "nodeSource[NOC:it-copyrename].interfaceSnmp[eth0]")
+                        .externalTag("foreignSource", "NOC")
+                        .externalTag("foreignId", "it-copyrename")
+                        .build())
+                .time(now)
+                .value(2.0)
+                .build();
+
+        storage.store(List.of(sample));
+
+        PluginMetrics m = storage.getMetrics();
+        await().atMost(Duration.ofSeconds(20))
+               .until(() -> m.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue() >= 1L);
+
+        TagMatcher nameMatcher = ImmutableTagMatcher.builder()
+                .type(TagMatcher.Type.EQUALS)
+                .key("name")
+                .value(metricName)
+                .build();
+
+        List<Metric> found = await().atMost(Duration.ofSeconds(20))
+                .until(() -> storage.findMetrics(List.of(nameMatcher)),
+                       list -> !list.isEmpty());
+        assertThat(found).hasSize(1);
+
+        var keys = found.get(0).getMetaTags().stream().map(t -> t.getKey()).toList();
+        assertThat(keys).contains("host", "instance");
+        assertThat(keys).doesNotContain("node");
+
+        assertThat(found.get(0).getMetaTags())
+                .anySatisfy(t -> {
+                    assertThat(t.getKey()).isEqualTo("host");
+                    assertThat(t.getValue()).isEqualTo("NOC:it-copyrename");
+                })
+                .anySatisfy(t -> {
+                    assertThat(t.getKey()).isEqualTo("instance");
+                    assertThat(t.getValue()).isEqualTo("NOC:it-copyrename");
+                });
+    }
 }
