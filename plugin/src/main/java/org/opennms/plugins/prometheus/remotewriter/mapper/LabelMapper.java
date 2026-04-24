@@ -24,6 +24,7 @@ import org.opennms.integration.api.v1.timeseries.Metric;
 import org.opennms.integration.api.v1.timeseries.Sample;
 import org.opennms.integration.api.v1.timeseries.Tag;
 import org.opennms.plugins.prometheus.remotewriter.config.PrometheusRemoteWriterConfig;
+import org.opennms.plugins.prometheus.remotewriter.metrics.PluginMetrics;
 import org.opennms.plugins.prometheus.remotewriter.sanitize.Sanitizer;
 import org.opennms.plugins.prometheus.remotewriter.wire.MappedSample;
 import org.slf4j.Logger;
@@ -113,6 +114,10 @@ public final class LabelMapper {
     private final String instanceId;
     private final String jobName;
     private final MetadataProcessor metadataProcessor;
+    /** Plugin metrics sink. May be null — tests that don't care about the
+     *  counter use the 1-arg constructor which leaves this null; the
+     *  increment in {@link #map(Sample)} is guarded accordingly. */
+    private final PluginMetrics metrics;
     /** One-shot WARN gate for unknown labels.copy sources. Entry is added the
      *  first time a source is observed missing (or empty-valued) at copy
      *  time; subsequent occurrences on the same source are silent.
@@ -130,6 +135,10 @@ public final class LabelMapper {
     private final Set<String> warnedCopyTargetClobbers = ConcurrentHashMap.newKeySet();
 
     public LabelMapper(PrometheusRemoteWriterConfig config) {
+        this(config, null);
+    }
+
+    public LabelMapper(PrometheusRemoteWriterConfig config, PluginMetrics metrics) {
         Objects.requireNonNull(config, "config");
         this.excludeGlobs      = compileGlobs(config.labelsExcludeGlobs());
         this.includeGlobs      = compileGlobs(config.labelsIncludeGlobs());
@@ -139,6 +148,7 @@ public final class LabelMapper {
         this.instanceId        = config.getInstanceId();
         this.jobName           = config.getJobName();
         this.metadataProcessor = new MetadataProcessor(config);
+        this.metrics           = metrics;
     }
 
     /** Visible for tests — unmodifiable view of labels.copy sources that
@@ -178,6 +188,9 @@ public final class LabelMapper {
         }
 
         Defaults defaults = buildDefaults(metricName, sourceTags, instanceId, jobName);
+        if (defaults.resourceIdWasUnparseable() && metrics != null) {
+            metrics.samplesUnparseableResourceId(1);
+        }
         // Work on a fresh mutable copy; apply{Exclude,Include} may pass the
         // map through unchanged when globs are empty, and metadataProcessor
         // then mutates it — we do not want those mutations to leak back into
@@ -201,12 +214,21 @@ public final class LabelMapper {
     // -- defaults -------------------------------------------------------------
 
     /**
-     * Result of {@link #buildDefaults}: the label map plus the set of source-tag
-     * keys the default allowlist consumed. {@link #applyInclude} uses the set to
-     * skip keys the defaults already own, preventing {@code labels.include = *}
-     * from re-emitting them under a snake-cased alias.
+     * Result of {@link #buildDefaults}: the label map, the set of source-tag
+     * keys the default allowlist consumed, and a flag indicating whether the
+     * sample's {@code resourceId} failed all three parser grammars (used by
+     * {@link #map(Sample)} to increment the
+     * {@link PluginMetrics#SAMPLES_UNPARSEABLE_RESOURCE_ID} counter without
+     * {@code buildDefaults} itself taking a dependency on {@code PluginMetrics}
+     * — keeps the method trivially test-isolable).
+     *
+     * <p>{@link #applyInclude} uses {@code consumedSourceKeys} to skip keys
+     * the defaults already own, preventing {@code labels.include = *} from
+     * re-emitting them under a snake-cased alias.
      */
-    record Defaults(Map<String, String> labels, Set<String> consumedSourceKeys) {}
+    record Defaults(Map<String, String> labels,
+                    Set<String> consumedSourceKeys,
+                    boolean resourceIdWasUnparseable) {}
 
     static Defaults buildDefaults(String metricName, Map<String, String> tags, String instanceId, String jobName) {
         Map<String, String> out = new LinkedHashMap<>();
@@ -310,7 +332,13 @@ public final class LabelMapper {
                 }
             }
         }
-        return new Defaults(out, Set.copyOf(consumed));
+        // `parsed == null` captures both "resourceId was null" and "resourceId
+        // was present but all three parser grammars missed" — the catch-all
+        // branch that also drives `job="opennms"` in deriveJob. Exposed on
+        // Defaults so the map() caller can increment the parser-fallthrough
+        // counter without passing PluginMetrics into buildDefaults itself.
+        boolean resourceIdWasUnparseable = (parsed == null);
+        return new Defaults(out, Set.copyOf(consumed), resourceIdWasUnparseable);
     }
 
     private static void putIfPresent(Map<String, String> out, String labelName,

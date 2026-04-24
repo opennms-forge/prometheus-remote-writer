@@ -25,20 +25,21 @@ import com.codahale.metrics.MetricRegistry;
  */
 public final class PluginMetrics {
 
-    public static final String SAMPLES_WRITTEN            = "samples_written_total";
-    public static final String SAMPLES_DROPPED_4XX        = "samples_dropped_4xx_total";
-    public static final String SAMPLES_DROPPED_5XX        = "samples_dropped_5xx_total";
-    public static final String SAMPLES_DROPPED_TRANSPORT  = "samples_dropped_transport_total";
-    public static final String SAMPLES_DROPPED_QUEUE_FULL = "samples_dropped_queue_full_total";
-    public static final String SAMPLES_DROPPED_NONFINITE  = "samples_dropped_nonfinite_total";
-    public static final String SAMPLES_DROPPED_DUPLICATE  = "samples_dropped_duplicate_total";
-    public static final String DELETE_NOOP                = "delete_noop_total";
-    public static final String METADATA_DENYLIST_BLOCKED  = "metadata_denylist_blocked_total";
-    public static final String QUEUE_DEPTH                = "queue_depth";
-    public static final String HTTP_BYTES_WRITTEN         = "http_bytes_written_total";
-    public static final String HTTP_WRITES_SUCCESSFUL     = "http_writes_successful_total";
-    public static final String HTTP_WRITES_FAILED         = "http_writes_failed_total";
-    public static final String HTTP_IN_FLIGHT             = "http_in_flight";
+    public static final String SAMPLES_WRITTEN                 = "samples_written_total";
+    public static final String SAMPLES_DROPPED_4XX             = "samples_dropped_4xx_total";
+    public static final String SAMPLES_DROPPED_5XX             = "samples_dropped_5xx_total";
+    public static final String SAMPLES_DROPPED_TRANSPORT       = "samples_dropped_transport_total";
+    public static final String SAMPLES_DROPPED_QUEUE_FULL      = "samples_dropped_queue_full_total";
+    public static final String SAMPLES_DROPPED_NONFINITE       = "samples_dropped_nonfinite_total";
+    public static final String SAMPLES_DROPPED_DUPLICATE       = "samples_dropped_duplicate_total";
+    public static final String SAMPLES_UNPARSEABLE_RESOURCE_ID = "samples_unparseable_resource_id_total";
+    public static final String DELETE_NOOP                     = "delete_noop_total";
+    public static final String METADATA_DENYLIST_BLOCKED       = "metadata_denylist_blocked_total";
+    public static final String QUEUE_DEPTH                     = "queue_depth";
+    public static final String HTTP_BYTES_WRITTEN              = "http_bytes_written_total";
+    public static final String HTTP_WRITES_SUCCESSFUL          = "http_writes_successful_total";
+    public static final String HTTP_WRITES_FAILED              = "http_writes_failed_total";
+    public static final String HTTP_IN_FLIGHT                  = "http_in_flight";
 
     private final MetricRegistry registry = new MetricRegistry();
     private final Counter samplesWritten;
@@ -47,26 +48,29 @@ public final class PluginMetrics {
     private final Counter samplesDroppedTransport;
     private final Counter samplesDroppedNonfinite;
     private final Counter samplesDroppedDuplicate;
+    private final Counter samplesUnparseableResourceId;
 
     public PluginMetrics() {
-        this.samplesWritten          = registry.counter(SAMPLES_WRITTEN);
-        this.samplesDropped4xx       = registry.counter(SAMPLES_DROPPED_4XX);
-        this.samplesDropped5xx       = registry.counter(SAMPLES_DROPPED_5XX);
-        this.samplesDroppedTransport = registry.counter(SAMPLES_DROPPED_TRANSPORT);
-        this.samplesDroppedNonfinite = registry.counter(SAMPLES_DROPPED_NONFINITE);
-        this.samplesDroppedDuplicate = registry.counter(SAMPLES_DROPPED_DUPLICATE);
+        this.samplesWritten               = registry.counter(SAMPLES_WRITTEN);
+        this.samplesDropped4xx            = registry.counter(SAMPLES_DROPPED_4XX);
+        this.samplesDropped5xx            = registry.counter(SAMPLES_DROPPED_5XX);
+        this.samplesDroppedTransport      = registry.counter(SAMPLES_DROPPED_TRANSPORT);
+        this.samplesDroppedNonfinite      = registry.counter(SAMPLES_DROPPED_NONFINITE);
+        this.samplesDroppedDuplicate      = registry.counter(SAMPLES_DROPPED_DUPLICATE);
+        this.samplesUnparseableResourceId = registry.counter(SAMPLES_UNPARSEABLE_RESOURCE_ID);
     }
 
     public MetricRegistry registry() { return registry; }
 
     // ---- counter mutators (called by Flusher per flush) -------------------
 
-    public void samplesWritten(long n)          { if (n > 0) samplesWritten.inc(n); }
-    public void samplesDropped4xx(long n)       { if (n > 0) samplesDropped4xx.inc(n); }
-    public void samplesDropped5xx(long n)       { if (n > 0) samplesDropped5xx.inc(n); }
-    public void samplesDroppedTransport(long n) { if (n > 0) samplesDroppedTransport.inc(n); }
-    public void samplesDroppedNonfinite(long n) { if (n > 0) samplesDroppedNonfinite.inc(n); }
-    public void samplesDroppedDuplicate(long n) { if (n > 0) samplesDroppedDuplicate.inc(n); }
+    public void samplesWritten(long n)                 { if (n > 0) samplesWritten.inc(n); }
+    public void samplesDropped4xx(long n)              { if (n > 0) samplesDropped4xx.inc(n); }
+    public void samplesDropped5xx(long n)              { if (n > 0) samplesDropped5xx.inc(n); }
+    public void samplesDroppedTransport(long n)        { if (n > 0) samplesDroppedTransport.inc(n); }
+    public void samplesDroppedNonfinite(long n)        { if (n > 0) samplesDroppedNonfinite.inc(n); }
+    public void samplesDroppedDuplicate(long n)        { if (n > 0) samplesDroppedDuplicate.inc(n); }
+    public void samplesUnparseableResourceId(long n)   { if (n > 0) samplesUnparseableResourceId.inc(n); }
 
     // ---- gauge registration (called by Storage on start) ------------------
 

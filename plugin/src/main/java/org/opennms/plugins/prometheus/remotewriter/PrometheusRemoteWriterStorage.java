@@ -144,7 +144,7 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         Flusher               f  = null;
         try {
             m  = new PluginMetrics();
-            lm = new LabelMapper(config);
+            lm = new LabelMapper(config, m);
             q  = new SampleQueue(config.getQueueCapacity());
             wc = new RemoteWriteHttpClient(config);
             rc = new PrometheusReadClient(config);

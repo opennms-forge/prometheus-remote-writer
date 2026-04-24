@@ -23,6 +23,7 @@ import org.opennms.integration.api.v1.timeseries.Sample;
 import org.opennms.integration.api.v1.timeseries.immutables.ImmutableMetric;
 import org.opennms.integration.api.v1.timeseries.immutables.ImmutableSample;
 import org.opennms.plugins.prometheus.remotewriter.config.PrometheusRemoteWriterConfig;
+import org.opennms.plugins.prometheus.remotewriter.metrics.PluginMetrics;
 import org.opennms.plugins.prometheus.remotewriter.wire.MappedSample;
 
 class LabelMapperTest {
@@ -685,6 +686,124 @@ class LabelMapperTest {
         MappedSample out = new LabelMapper(c).map(interfaceSample());
         assertThat(out.labels()).containsEntry("job", "snmp");
     }
+
+    // ---------- samples_unparseable_resource_id counter (v0.5) ---------------
+
+    @Test
+    void defaults_flags_unparseable_resource_id() {
+        Map<String, String> tags = new LinkedHashMap<>();
+        tags.put(IntrinsicTagNames.name, "foo");
+        tags.put(IntrinsicTagNames.resourceId, "not-a-valid-shape");
+        LabelMapper.Defaults d = LabelMapper.buildDefaults("foo", tags, null, null);
+        assertThat(d.resourceIdWasUnparseable()).isTrue();
+    }
+
+    @Test
+    void defaults_flags_missing_resource_id_as_unparseable() {
+        // No resourceId tag at all — same catch-all branch in deriveJob, same
+        // flag for the counter.
+        Map<String, String> tags = new LinkedHashMap<>();
+        tags.put(IntrinsicTagNames.name, "foo");
+        LabelMapper.Defaults d = LabelMapper.buildDefaults("foo", tags, null, null);
+        assertThat(d.resourceIdWasUnparseable()).isTrue();
+    }
+
+    @Test
+    void defaults_does_not_flag_bracketed_resource_id() {
+        Map<String, String> tags = new LinkedHashMap<>();
+        tags.put(IntrinsicTagNames.name, "ifHCInOctets");
+        tags.put(IntrinsicTagNames.resourceId, "nodeSource[NOC:router-42].interfaceSnmp[eth0]");
+        LabelMapper.Defaults d = LabelMapper.buildDefaults("ifHCInOctets", tags, null, null);
+        assertThat(d.resourceIdWasUnparseable()).isFalse();
+    }
+
+    @Test
+    void defaults_does_not_flag_slash_db_resource_id() {
+        Map<String, String> tags = new LinkedHashMap<>();
+        tags.put(IntrinsicTagNames.name, "foo");
+        tags.put(IntrinsicTagNames.resourceId, "snmp/42/hrStorageIndex/1");
+        LabelMapper.Defaults d = LabelMapper.buildDefaults("foo", tags, null, null);
+        assertThat(d.resourceIdWasUnparseable()).isFalse();
+    }
+
+    @Test
+    void defaults_does_not_flag_slash_fs_resource_id() {
+        Map<String, String> tags = new LinkedHashMap<>();
+        tags.put(IntrinsicTagNames.name, "foo");
+        tags.put(IntrinsicTagNames.resourceId, "snmp/fs/selfmonitor/1/jmx-minion/Heap");
+        LabelMapper.Defaults d = LabelMapper.buildDefaults("foo", tags, null, null);
+        assertThat(d.resourceIdWasUnparseable()).isFalse();
+    }
+
+    @Test
+    void counter_increments_on_unparseable_resource_id_at_map_time() {
+        PluginMetrics metrics = new PluginMetrics();
+        LabelMapper mapper = new LabelMapper(defaultConfig(), metrics);
+
+        assertThat(metrics.snapshot().get(PluginMetrics.SAMPLES_UNPARSEABLE_RESOURCE_ID).longValue())
+                .isZero();
+
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "foo")
+                .intrinsicTag("resourceId", "garbage"));
+        mapper.map(s);
+        assertThat(metrics.snapshot().get(PluginMetrics.SAMPLES_UNPARSEABLE_RESOURCE_ID).longValue())
+                .isEqualTo(1);
+
+        // A parseable sample must NOT bump the counter.
+        mapper.map(interfaceSample());
+        assertThat(metrics.snapshot().get(PluginMetrics.SAMPLES_UNPARSEABLE_RESOURCE_ID).longValue())
+                .isEqualTo(1);
+
+        // Another unparseable sample continues to bump.
+        mapper.map(s);
+        assertThat(metrics.snapshot().get(PluginMetrics.SAMPLES_UNPARSEABLE_RESOURCE_ID).longValue())
+                .isEqualTo(2);
+    }
+
+    @Test
+    void counter_increments_for_sample_with_no_resource_id_at_all() {
+        // Delta spec scenario: "Counter increments for samples with no
+        // resourceId tag at all". Distinct from "unparseable resourceId" —
+        // the flag is set the same way (parsed == null) but the scenario
+        // deserves its own end-to-end bump-the-counter test so a future
+        // refactor that treats absent-tag differently from failed-parse
+        // surfaces as a named failure.
+        PluginMetrics metrics = new PluginMetrics();
+        LabelMapper mapper = new LabelMapper(defaultConfig(), metrics);
+
+        Sample s = sample(ImmutableMetric.builder().intrinsicTag("name", "foo"));
+        mapper.map(s);
+
+        assertThat(metrics.snapshot().get(PluginMetrics.SAMPLES_UNPARSEABLE_RESOURCE_ID).longValue())
+                .isEqualTo(1);
+    }
+
+    @Test
+    void counter_increments_even_when_job_name_override_is_set() {
+        // Counter tracks parser fallthrough rate — independent of whether the
+        // derivation's "opennms" fallback value is actually surfaced as the
+        // `job` label. Operators want the raw fallthrough signal even when
+        // they've overridden `job.name`.
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setJobName("my-fleet");
+        PluginMetrics metrics = new PluginMetrics();
+        LabelMapper mapper = new LabelMapper(c, metrics);
+
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "foo")
+                .intrinsicTag("resourceId", "garbage"));
+        MappedSample out = mapper.map(s);
+
+        // Operator's override wins for the label value.
+        assertThat(out.labels()).containsEntry("job", "my-fleet");
+        // But the counter still increments — it's the parser-fallthrough
+        // signal, not the surfaced-value signal.
+        assertThat(metrics.snapshot().get(PluginMetrics.SAMPLES_UNPARSEABLE_RESOURCE_ID).longValue())
+                .isEqualTo(1);
+    }
+
+    // ---------- labels.exclude honors job and instance (v0.4) ---------------
 
     @Test
     void labels_exclude_removes_default_job_and_instance() {
