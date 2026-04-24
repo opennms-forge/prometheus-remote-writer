@@ -595,12 +595,20 @@ durable across restarts and extended outages.
 ## Write-Ahead Log (durable buffering)
 
 Opt-in via `wal.enabled=true`. When enabled, every `store()` sample is
-durably persisted to an on-disk Write-Ahead Log before the call returns,
-and the WAL replaces the in-memory `queue.capacity` buffer as source of
-truth. This gives the plugin two properties the v0.1 queue couldn't:
+appended to an on-disk Write-Ahead Log before the call returns, and the
+WAL replaces the in-memory `queue.capacity` buffer as source of truth.
+The `wal.fsync` policy controls when the OS flushes those bytes from
+the page cache to stable storage — the default `batch` fsyncs at each
+flush-interval boundary, which loses up to `flush.interval-ms` of
+samples on `kill -9` / kernel panic / power loss but matches typical
+remote-write RPO expectations. See the `wal.fsync` table row below.
 
-- **Restart preservation** — samples queued before a shutdown / crash
-  replay to the endpoint on the next process start.
+This gives the plugin two properties the v0.1 queue couldn't:
+
+- **Restart preservation** — samples queued before a graceful shutdown
+  replay to the endpoint on the next process start. Under the default
+  `batch` fsync, a `kill -9` may lose the last fsync window's worth
+  of samples; everything before that is durable.
 - **Extended outage buffering** — 5xx / transport failures never
   advance the WAL checkpoint. The plugin retries from the same offset
   on every flush cycle for as long as the endpoint stays down, up to
@@ -619,9 +627,13 @@ truth. This gives the plugin two properties the v0.1 queue couldn't:
 
 When `wal.enabled=true`:
 - `queue.capacity` is ignored (WARN logged at startup if explicitly set).
-- `shutdown.grace-period-ms` bounds the in-flight HTTP deadline, not a
-  drain window — WAL durability means nothing is lost at shutdown
-  regardless of grace value.
+- `shutdown.grace-period-ms` bounds the wait for the flusher loop to
+  exit cleanly — NOT a strict in-flight-HTTP deadline. Worker threads
+  blocked on a dead TCP connection may continue past the grace window
+  until `http.read-timeout-ms` (the HTTP client cancels them when the
+  shutdown sequence proceeds to `writeClient.shutdown()`). WAL
+  durability means nothing is lost at shutdown regardless of grace
+  value — anything pending replays on next start.
 
 ### Operational notes
 

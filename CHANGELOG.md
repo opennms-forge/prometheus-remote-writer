@@ -32,11 +32,14 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Eight new metrics** (wal.enabled=true only), surfaced via
   `opennms:prometheus-writer-stats`:
-  - `wal_bytes_written_total`, `wal_bytes_checkpointed_total`,
-    `wal_replay_samples_total`, `wal_batches_dropped_4xx_total`,
-    `samples_dropped_wal_full_total` (counters)
-  - `wal_disk_usage_bytes`, `wal_segments_active`,
-    `wal_oldest_sample_ts_ms` (gauges)
+  - Counters: `wal_bytes_written_total`,
+    `wal_bytes_checkpointed_total` (bytes that moved past the
+    durable checkpoint), `wal_replay_samples_total` (one-shot
+    at startup), `wal_batches_dropped_4xx_total`,
+    `samples_dropped_wal_full_total`,
+    `wal_frames_dropped_corrupted_total` (sealed-segment
+    skips due to bit rot / torn frames)
+  - Gauges: `wal_disk_usage_bytes`, `wal_segments_active`
 
 - **`samples_unparseable_resource_id_total` counter** — increments once per
   sample whose `resourceId` tag failed all parser grammars (bracketed,
@@ -49,13 +52,17 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - **`shutdown.grace-period-ms` semantic shift when `wal.enabled=true`** —
-  the knob now bounds the in-flight HTTP request deadline rather than a
-  data-drain window. WAL durability means no sample is lost at
-  shutdown regardless of grace value; anything unshipped replays on
-  next start. Operators who set a large grace value (e.g., 60_000) for
-  drain-safety under v0.4 can safely reduce it. The
-  `wal.enabled=false` path (default) retains the v0.4 drain-or-lose
-  semantics exactly.
+  the knob now bounds the wait for the flusher loop to exit cleanly,
+  rather than a data-drain window. (Note: `Thread.interrupt()` does
+  not cancel an in-flight OkHttp call, so a worker blocked on a dead
+  TCP connection may continue past the grace window until
+  `http.read-timeout-ms`; the HTTP client is shut down right after
+  the grace, which is what actually breaks the call.) WAL durability
+  means no sample is lost at shutdown regardless of grace value;
+  anything unshipped replays on next start. Operators who set a large
+  grace value (e.g., 60_000) for drain-safety under v0.4 can safely
+  reduce it. The `wal.enabled=false` path (default) retains the v0.4
+  drain-or-lose semantics exactly.
 - **`queue.capacity` ignored when `wal.enabled=true`** — WARN logged
   at startup if the operator explicitly sets it. The WAL replaces the
   in-memory queue; size via `wal.max-size-bytes` instead.

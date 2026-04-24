@@ -305,17 +305,22 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
 
     private void stopWalMode(Active a) {
         try {
-            // The grace period bounds the in-flight HTTP request only;
-            // WAL durability means unflushed samples are NOT lost — they
-            // replay on next start.
-            long readerOffsetAtStop = a.walFlusher().readerOffset();
+            // The grace period bounds the stop-thread's wait for the
+            // flusher loop to exit. WAL durability means unflushed
+            // samples are NOT lost — they replay on next start.
+            //
+            // Note: Thread.interrupt() does NOT cancel an in-flight
+            // OkHttp call. A POST stuck on a dead TCP connection will
+            // continue running until http.read-timeout-ms even after
+            // the grace window elapses; the writeClient.shutdown()
+            // below cancels the dispatcher to break out faster.
+            int pending = a.walFlusher().pendingSampleCount();
             long checkpointAtStop = a.checkpoint().lastSentOffset();
             a.walFlusher().stop(config.getShutdownGracePeriodMs());
-            long pending = readerOffsetAtStop - checkpointAtStop;
             if (pending > 0) {
-                LOG.info("WAL shutdown: {} byte(s) read past checkpoint not yet acked; "
-                        + "will replay from checkpoint offset {} on next start",
-                        pending, checkpointAtStop);
+                LOG.info("WAL shutdown: {} sample(s) drained past checkpoint not yet "
+                        + "acknowledged; will replay from checkpoint offset {} on "
+                        + "next start", pending, checkpointAtStop);
             }
         } catch (RuntimeException e) {
             LOG.warn("error stopping wal-flusher: {}", e.getMessage(), e);

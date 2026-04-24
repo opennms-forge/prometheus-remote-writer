@@ -72,6 +72,14 @@ public final class WalFlusher {
     private volatile boolean running;
     private Thread thread;
 
+    /**
+     * Cumulative count of samples drained from the WAL but not yet
+     * checkpointed. Bumped per-batch when nextBatch returns payloads;
+     * decremented (clamped to zero) on each successful advance.
+     * Single-thread access (the flusher loop), so a plain int is fine.
+     */
+    private int samplesDrainedSinceLastCheckpoint;
+
     public WalFlusher(Path walDir, WalWriter writer, Checkpoint checkpoint,
                       int maxPayload, RemoteWriteHttpClient httpClient,
                       int batchSize, long flushIntervalMs, PluginMetrics metrics) {
@@ -138,9 +146,21 @@ public final class WalFlusher {
         }
     }
 
-    /** Current reader offset (for wal_oldest_sample_ts_ms gauge + shutdown logging). */
+    /** Current reader offset (for shutdown logging). */
     public long readerOffset() {
         return reader.currentOffset();
+    }
+
+    /**
+     * Approximate count of samples drained from the WAL but not yet
+     * confirmed shipped (i.e., past the reader but not past the
+     * checkpoint). Used for the shutdown INFO log "N samples pending"
+     * which is a more operator-meaningful unit than raw bytes. Single
+     * counter incremented per successful nextBatch payload list and
+     * cleared (clamped to 0) per successful advance.
+     */
+    public int pendingSampleCount() {
+        return Math.max(0, samplesDrainedSinceLastCheckpoint);
     }
 
     private void run() {
@@ -166,6 +186,8 @@ public final class WalFlusher {
 
     /** Package-private for unit tests — runs one flush iteration synchronously. */
     void flushBatch(ReadResult batch) {
+        samplesDrainedSinceLastCheckpoint += batch.size();
+
         // Pass through any corruption-skip count from the reader so the
         // operator sees a counter tick (the reader logs WARN; this
         // surfaces it as a metric).
@@ -265,9 +287,12 @@ public final class WalFlusher {
             return;
         }
 
-        // Advance succeeded. Now best-effort: reader-floor and GC.
-        // Failures here only delay GC / floor updates; next successful
-        // batch re-runs them.
+        // Advance succeeded. Reset pending-sample count — the samples
+        // we just shipped are now durably acknowledged.
+        samplesDrainedSinceLastCheckpoint = 0;
+
+        // Best-effort: reader-floor and GC. Failures here only delay GC
+        // / floor updates; next successful batch re-runs them.
         try {
             writer.setReaderOffsetFloor(newOffset);
             long bytesPastCheckpoint = newOffset - previousOffset;
