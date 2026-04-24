@@ -98,6 +98,14 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   scoping filter. Cross-source value-correlation bridges (for queries that
   need the SAME value to identify "the same box" across sources) remain
   the operator's responsibility via backend `relabel_config`.
+- **Operators who configured `labels.copy` via Karaf `config:edit` on v0.3**
+  (rather than via the `.cfg` file, where the binding was missing on v0.3):
+  verify your `labels.copy` value is still set after the v0.4 bundle
+  activates. v0.4 adds the previously-missing `<cm:property name="labels.copy">`
+  default to the Blueprint descriptor; Aries Blueprint's merge behavior
+  between an empty default and an existing ConfigAdmin dictionary may reset
+  the value in edge cases. Re-apply via `config:edit` or the `.cfg` file if
+  so.
 
 ## [0.3.0] — TBD
 
