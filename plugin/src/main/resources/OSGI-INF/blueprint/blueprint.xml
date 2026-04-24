@@ -23,6 +23,7 @@
             <cm:property name="read.url"  value=""/>
             <!-- Source identity -->
             <cm:property name="instance.id" value=""/>
+            <cm:property name="job.name"    value=""/>
             <!-- Auth -->
             <cm:property name="auth.basic.username" value=""/>
             <cm:property name="auth.basic.password" value=""/>
@@ -51,6 +52,7 @@
             <cm:property name="labels.include" value=""/>
             <cm:property name="labels.exclude" value=""/>
             <cm:property name="labels.rename"  value=""/>
+            <cm:property name="labels.copy"    value=""/>
             <cm:property name="metric.prefix"  value=""/>
             <!-- Metadata passthrough -->
             <cm:property name="metadata.enabled"       value="false"/>
@@ -70,6 +72,7 @@
         <property name="writeUrl"                value="${write.url}"/>
         <property name="readUrl"                 value="${read.url}"/>
         <property name="instanceId"              value="${instance.id}"/>
+        <property name="jobName"                 value="${job.name}"/>
         <property name="basicUsername"           value="${auth.basic.username}"/>
         <property name="basicPassword"           value="${auth.basic.password}"/>
         <property name="bearerToken"             value="${auth.bearer.token}"/>
@@ -91,6 +94,7 @@
         <property name="labelsInclude"           value="${labels.include}"/>
         <property name="labelsExclude"           value="${labels.exclude}"/>
         <property name="labelsRename"            value="${labels.rename}"/>
+        <property name="labelsCopy"              value="${labels.copy}"/>
         <property name="metricPrefix"            value="${metric.prefix}"/>
         <property name="metadataEnabled"         value="${metadata.enabled}"/>
         <property name="metadataInclude"         value="${metadata.include}"/>

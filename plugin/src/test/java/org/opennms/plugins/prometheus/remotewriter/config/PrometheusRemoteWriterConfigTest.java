@@ -125,6 +125,50 @@ class PrometheusRemoteWriterConfigTest {
         assertThatCode(c::validate).doesNotThrowAnyException();
     }
 
+    // ---------- job.name ----------------------------------------------------
+
+    @Test
+    void job_name_is_unset_by_default() {
+        assertThat(minimal().getJobName()).isNull();
+    }
+
+    @Test
+    void job_name_blank_normalises_to_null() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setJobName("   ");
+        assertThat(c.getJobName()).isNull();
+        c.setJobName("");
+        assertThat(c.getJobName()).isNull();
+    }
+
+    @Test
+    void job_name_non_blank_is_preserved() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setJobName("opennms-prod");
+        assertThat(c.getJobName()).isEqualTo("opennms-prod");
+        assertThatCode(c::validate).doesNotThrowAnyException();
+    }
+
+    @Test
+    void job_name_with_control_characters_is_rejected() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setJobName("ops\nteam");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("job.name")
+            .hasMessageContaining("control characters");
+    }
+
+    @Test
+    void job_name_longer_than_2048_bytes_is_rejected_at_validate() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setJobName("j".repeat(2049));
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("job.name")
+            .hasMessageContaining("2048");
+    }
+
     @Test
     void instance_id_is_trimmed() {
         PrometheusRemoteWriterConfig c = minimal();
