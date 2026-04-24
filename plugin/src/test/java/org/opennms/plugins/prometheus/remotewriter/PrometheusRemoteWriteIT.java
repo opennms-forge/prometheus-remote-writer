@@ -125,12 +125,26 @@ class PrometheusRemoteWriteIT {
         Metric m0 = found.get(0);
 
         // The default-allowlist labels should all round-trip (as meta tags
-        // on the read side — partition-lossy is by design).
+        // on the read side — partition-lossy is by design). `job` and
+        // `instance` joined the default set in v0.4.
         var keys = m0.getMetaTags().stream().map(t -> t.getKey()).toList();
         assertThat(keys).contains(
+                "job", "instance",
                 "node", "foreign_source", "foreign_id", "location",
                 "resource_type", "resource_instance", "if_name", "if_speed");
         assertThat(keys).contains("onms_cat_Routers", "onms_cat_ProductionSites");
+
+        // job derives to "snmp" from a bracketed-form resourceId; instance
+        // mirrors node for the FS-qualified identity.
+        assertThat(m0.getMetaTags())
+                .anySatisfy(t -> {
+                    assertThat(t.getKey()).isEqualTo("job");
+                    assertThat(t.getValue()).isEqualTo("snmp");
+                })
+                .anySatisfy(t -> {
+                    assertThat(t.getKey()).isEqualTo("instance");
+                    assertThat(t.getValue()).isEqualTo("NOC:it-host");
+                });
         // Negative assertion: default fixture does not set instance.id, so the
         // origin-identity label MUST NOT appear.
         assertThat(keys).doesNotContain("onms_instance_id");
@@ -329,15 +343,16 @@ class PrometheusRemoteWriteIT {
 
     @Test
     void labels_copy_emits_second_label_that_round_trips() throws Exception {
-        // labels.copy = node -> instance: the same value is emitted under
+        // labels.copy = node -> cluster: the same value is emitted under
         // two label names. Prometheus stores both; findMetrics surfaces both
-        // as meta tags with equal values.
+        // as meta tags with equal values. Uses `cluster` rather than
+        // `instance` because v0.4 reserved `instance` (now a default emit).
         storage.stop();
         PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
         String base = "http://" + prometheus.getHost() + ":" + prometheus.getMappedPort(9090);
         c.setWriteUrl(base + "/api/v1/write");
         c.setReadUrl(base);
-        c.setLabelsCopy("node -> instance");
+        c.setLabelsCopy("node -> cluster");
         c.setBatchSize(10);
         c.setFlushIntervalMs(100);
         c.setRetryInitialBackoffMs(100);
@@ -383,23 +398,24 @@ class PrometheusRemoteWriteIT {
             assertThat(t.getValue()).isEqualTo("NOC:it-copy");
         });
         assertThat(tags).anySatisfy(t -> {
-            assertThat(t.getKey()).isEqualTo("instance");
+            assertThat(t.getKey()).isEqualTo("cluster");
             assertThat(t.getValue()).isEqualTo("NOC:it-copy");
         });
     }
 
     @Test
     void labels_copy_combined_with_rename_emits_both_renamed_and_copied_labels() throws Exception {
-        // labels.copy = node -> instance AND labels.rename = node -> host:
+        // labels.copy = node -> cluster AND labels.rename = node -> host:
         // copy runs first on pre-rename `node`, rename then moves `node` to
-        // `host`. Both `host` and `instance` reach Prometheus with the same
-        // node value; `node` itself is gone.
+        // `host`. Both `host` and `cluster` reach Prometheus with the same
+        // node value; `node` itself is gone. Uses `cluster` rather than
+        // `instance` because v0.4 reserved `instance` (now a default emit).
         storage.stop();
         PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
         String base = "http://" + prometheus.getHost() + ":" + prometheus.getMappedPort(9090);
         c.setWriteUrl(base + "/api/v1/write");
         c.setReadUrl(base);
-        c.setLabelsCopy("node -> instance");
+        c.setLabelsCopy("node -> cluster");
         c.setLabelsRename("node -> host");
         c.setBatchSize(10);
         c.setFlushIntervalMs(100);
@@ -441,7 +457,7 @@ class PrometheusRemoteWriteIT {
         assertThat(found).hasSize(1);
 
         var keys = found.get(0).getMetaTags().stream().map(t -> t.getKey()).toList();
-        assertThat(keys).contains("host", "instance");
+        assertThat(keys).contains("host", "cluster");
         assertThat(keys).doesNotContain("node");
 
         assertThat(found.get(0).getMetaTags())
@@ -450,8 +466,115 @@ class PrometheusRemoteWriteIT {
                     assertThat(t.getValue()).isEqualTo("NOC:it-copyrename");
                 })
                 .anySatisfy(t -> {
-                    assertThat(t.getKey()).isEqualTo("instance");
+                    assertThat(t.getKey()).isEqualTo("cluster");
                     assertThat(t.getValue()).isEqualTo("NOC:it-copyrename");
                 });
+    }
+
+    @Test
+    void job_derives_to_jmx_for_slash_fs_resource_id() throws Exception {
+        // Self-monitor / JMX-shaped resourceId: `snmp/fs/<fs>/<fid>/jmx-*/<instance>`.
+        // The plugin's job derivation recognises the `jmx-*` (and
+        // `opennms-jvm`) group segments and emits `job="jmx"`, distinct from
+        // the `job="snmp"` default for regular collection. This lets
+        // operators scope dashboards to JVM-collected metrics with
+        // `{job="jmx"}`.
+        Instant now = Instant.now();
+        String metricName = "onms_it_jmx_" + System.nanoTime();
+        Sample sample = ImmutableSample.builder()
+                .metric(ImmutableMetric.builder()
+                        .intrinsicTag("name", metricName)
+                        .intrinsicTag("resourceId",
+                                "snmp/fs/selfmonitor/1/jmx-minion/OpenNMS_Name_Notifd")
+                        .build())
+                .time(now)
+                .value(3.14)
+                .build();
+
+        storage.store(List.of(sample));
+
+        PluginMetrics m = storage.getMetrics();
+        await().atMost(Duration.ofSeconds(20))
+               .until(() -> m.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue() >= 1L);
+
+        TagMatcher nameMatcher = ImmutableTagMatcher.builder()
+                .type(TagMatcher.Type.EQUALS)
+                .key("name")
+                .value(metricName)
+                .build();
+
+        List<Metric> found = await().atMost(Duration.ofSeconds(20))
+                .until(() -> storage.findMetrics(List.of(nameMatcher)),
+                       list -> !list.isEmpty());
+        assertThat(found).hasSize(1);
+
+        var tags = found.get(0).getMetaTags();
+        assertThat(tags).anySatisfy(t -> {
+            assertThat(t.getKey()).isEqualTo("job");
+            assertThat(t.getValue()).isEqualTo("jmx");
+        });
+        // Also confirm instance is populated from the parsed slash-FS identity.
+        assertThat(tags).anySatisfy(t -> {
+            assertThat(t.getKey()).isEqualTo("instance");
+            assertThat(t.getValue()).isEqualTo("selfmonitor:1");
+        });
+    }
+
+    @Test
+    void job_name_override_replaces_derivation() throws Exception {
+        // labels.copy is one config; this is a different knob: job.name
+        // forces every sample to carry `job=<this value>` regardless of
+        // resourceId shape. Useful when an operator wants fleet-wide
+        // consistency (e.g., `opennms-prod` across SNMP and JMX data).
+        storage.stop();
+        PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+        String base = "http://" + prometheus.getHost() + ":" + prometheus.getMappedPort(9090);
+        c.setWriteUrl(base + "/api/v1/write");
+        c.setReadUrl(base);
+        c.setJobName("opennms-prod");
+        c.setBatchSize(10);
+        c.setFlushIntervalMs(100);
+        c.setRetryInitialBackoffMs(100);
+        c.setRetryMaxBackoffMs(500);
+        c.setRetryMaxAttempts(10);
+        c.setShutdownGracePeriodMs(2_000);
+        storage = new PrometheusRemoteWriterStorage(c);
+        storage.start();
+
+        Instant now = Instant.now();
+        String metricName = "onms_it_jobname_" + System.nanoTime();
+        // Bracketed resourceId — would otherwise derive to job="snmp".
+        Sample sample = ImmutableSample.builder()
+                .metric(ImmutableMetric.builder()
+                        .intrinsicTag("name", metricName)
+                        .intrinsicTag("resourceId", "nodeSource[NOC:it-jobname].interfaceSnmp[eth0]")
+                        .externalTag("foreignSource", "NOC")
+                        .externalTag("foreignId", "it-jobname")
+                        .build())
+                .time(now)
+                .value(1.0)
+                .build();
+
+        storage.store(List.of(sample));
+
+        PluginMetrics m = storage.getMetrics();
+        await().atMost(Duration.ofSeconds(20))
+               .until(() -> m.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue() >= 1L);
+
+        TagMatcher nameMatcher = ImmutableTagMatcher.builder()
+                .type(TagMatcher.Type.EQUALS)
+                .key("name")
+                .value(metricName)
+                .build();
+
+        List<Metric> found = await().atMost(Duration.ofSeconds(20))
+                .until(() -> storage.findMetrics(List.of(nameMatcher)),
+                       list -> !list.isEmpty());
+        assertThat(found).hasSize(1);
+
+        assertThat(found.get(0).getMetaTags()).anySatisfy(t -> {
+            assertThat(t.getKey()).isEqualTo("job");
+            assertThat(t.getValue()).isEqualTo("opennms-prod");
+        });
     }
 }

@@ -7,14 +7,105 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] — TBD
+
+### Added
+
+- **`job` default label** — derived from the sample's `resourceId` shape:
+  bracketed or slash-DB SNMP patterns → `"snmp"`, slash-FS groups named
+  `jmx-*` or `opennms-jvm` → `"jmx"`, unparseable or absent resourceIds →
+  `"opennms"` (catch-all). Emitted unconditionally so `{job=~".+"}` covers
+  every sample.
+- **`instance` default label** — mirror of `node` with the same derivation
+  precedence (FS-qualified external tags > parsed slash-FS > parsed slash-DB
+  > external `nodeId`). Emitted iff `node` is emitted. `node` is kept
+  alongside — dashboards filtering on `{node="X"}` continue working
+  unchanged.
+- **`job.name` configuration key** — when set to a non-empty value,
+  overrides the per-sample `job` derivation with a fleet-wide constant.
+  Default: unset (use derivation).
+
+  Together, these enable the Prom-idiomatic `{job="X", instance="Y"}`
+  scoping idiom for cross-source dashboards that combine OpenNMS data
+  with node-exporter / OTel / other Prometheus data sources in a shared
+  backend. See README "Cross-source filtering" for the semantics and the
+  deliberate `instance = subject` stance.
+
+### Changed (BREAKING)
+
+- **`instance` and `job` added to the reserved-target list.**
+  `labels.rename = X -> instance` / `X -> job` and `labels.copy = Y -> instance`
+  / `Y -> job` are now rejected at startup with the existing "collides with
+  the default label" error. Operators who previously wrote
+  `labels.copy = node -> instance` as a workaround for the missing default
+  can remove the directive (the default emission covers it) — the config
+  parser would reject it anyway.
+
 ### Changed
 
-- **Internal**: `PrometheusRemoteWriterConfig.labelsRenameMap()` and `labelsCopyMap()` now cache their parsed result, returning the same `Map` instance across repeated calls within one config-string lifecycle. Setters invalidate. `validate()` no longer re-parses the same string three times per invocation. The returned maps continue to be unmodifiable (as before); the behavior change is strictly tighter — same content, stable identity.
+- **Internal**: `PrometheusRemoteWriterConfig.labelsRenameMap()` and
+  `labelsCopyMap()` now cache their parsed result, returning the same `Map`
+  instance across repeated calls within one config-string lifecycle. Setters
+  invalidate. `validate()` no longer re-parses the same string three times
+  per invocation. The returned maps continue to be unmodifiable (as before);
+  the behavior change is strictly tighter — same content, stable identity.
+
+### Fixed
+
+- `labels.copy` is now actually wired up from ConfigAdmin — v0.3 introduced
+  the Java setter and the parser + validator, but the Blueprint property
+  binding and the default placeholder entry were both missing. Operators
+  who tried `labels.copy = ...` in their `.cfg` on v0.3 saw a silent no-op.
+  v0.4 adds the Blueprint `<cm:property>` entry and the `<property name="labelsCopy">`
+  binding alongside `instance.id` and the new `job.name` knob. Also picks up
+  an earlier docs oversight: the README Configuration block was missing
+  `instance.id` entirely (has been since v0.1); now includes both `instance.id`
+  and `job.name` under a "Source identity" subsection.
 
 ### Tests
 
-- Pinned the `instance.id` WARN-suppression emission count — a refactor that kept the one-shot gate correct but moved `LOG.warn` outside the CAS-success branch would have passed the existing boolean-gate assertions and silently re-fired on every bundle activation. New counter + `getInstanceIdWarnCountForTesting()` accessor + three scenarios (first start, silent re-start, hot-reload with instance.id flipped on).
-- Pinned the harder one-pass invariant of `labels.copy`: the stage reads source values from its input map, not from the accumulating output, so a chained directive whose source was just clobbered by an earlier directive still sees the ORIGINAL value.
+- Pinned the `instance.id` WARN-suppression emission count — a refactor that
+  kept the one-shot gate correct but moved `LOG.warn` outside the CAS-success
+  branch would have passed the existing boolean-gate assertions and silently
+  re-fired on every bundle activation. New counter +
+  `getInstanceIdWarnCountForTesting()` accessor + three scenarios (first
+  start, silent re-start, hot-reload with instance.id flipped on).
+- Pinned the harder one-pass invariant of `labels.copy`: the stage reads
+  source values from its input map, not from the accumulating output, so a
+  chained directive whose source was just clobbered by an earlier directive
+  still sees the ORIGINAL value.
+
+### Upgrade notes
+
+- **Dashboards using `{node="X"}` are unaffected.** `node` is still a default
+  label with the same value semantics; `instance` is an additional emission.
+- **Dashboards built around `{job=..., instance=...}` work out of the box.**
+  No need for per-deployment `labels.copy = node -> instance` — it's a
+  default emit now.
+- **Operators with `labels.copy = node -> instance` in `.cfg`** must remove
+  it: v0.4 rejects the directive at startup because `instance` is reserved.
+  Once removed, the default emission carries the same value.
+- **Wire cost**: +30-50 bytes per sample for the two new labels (`job` is
+  short low-cardinality; `instance` shares cardinality and values with
+  `node`). For deployments pushing 1000 samples/sec, typical <1% wire
+  traffic increase. Opt out with `labels.exclude = instance, job` if
+  neither label is useful for your backend.
+- **Mixed backends**: operators combining OpenNMS data with node-exporter
+  will see `instance` carry different value shapes across sources
+  (node-exporter: `host:port`; OpenNMS: `<foreignSource>:<foreignId>` or
+  numeric dbId). This is by design — `instance` means "the measured
+  device" from each source's perspective; `job` is the primary cross-source
+  scoping filter. Cross-source value-correlation bridges (for queries that
+  need the SAME value to identify "the same box" across sources) remain
+  the operator's responsibility via backend `relabel_config`.
+- **Operators who configured `labels.copy` via Karaf `config:edit` on v0.3**
+  (rather than via the `.cfg` file, where the binding was missing on v0.3):
+  verify your `labels.copy` value is still set after the v0.4 bundle
+  activates. v0.4 adds the previously-missing `<cm:property name="labels.copy">`
+  default to the Blueprint descriptor; Aries Blueprint's merge behavior
+  between an empty default and an existing ConfigAdmin dictionary may reset
+  the value in edge cases. Re-apply via `config:edit` or the `.cfg` file if
+  so.
 
 ## [0.3.0] — TBD
 
@@ -296,7 +387,8 @@ Go sanitization rules.
 - Karaf feature `prometheus-remote-writer` shipping a pre-populated
   `etc/org.opennms.plugins.tss.prometheusremotewriter.cfg` on install.
 
-[Unreleased]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/releases/tag/v0.1.0

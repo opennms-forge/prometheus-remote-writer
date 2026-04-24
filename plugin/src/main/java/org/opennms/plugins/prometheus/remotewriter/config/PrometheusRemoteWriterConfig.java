@@ -46,6 +46,14 @@ public class PrometheusRemoteWriterConfig {
      *  PromQL. Orthogonal to {@link #tenantOrgId}; see README. */
     private String instanceId;
 
+    /** Operator-supplied override for the {@code job} default label. When
+     *  non-empty, every outbound sample emits {@code job=<this value>}
+     *  regardless of the resourceId-derived value (see
+     *  {@link org.opennms.plugins.prometheus.remotewriter.mapper.LabelMapper}
+     *  for the derivation table). When unset, the plugin derives per-sample
+     *  from the resourceId shape. */
+    private String jobName;
+
     // --- Auth ---
     private String basicUsername;
     private String basicPassword;
@@ -179,6 +187,24 @@ public class PrometheusRemoteWriterConfig {
                     "instance.id is " + bytes + " UTF-8 bytes; must not exceed "
                     + Sanitizer.MAX_LABEL_VALUE_BYTES
                     + " (Prometheus label-value cap). Pick a shorter identifier.");
+            }
+        }
+        if (jobName != null) {
+            // Same series-identity concerns apply to job.name — it overrides
+            // the per-sample job label value on every sample when set.
+            for (int i = 0; i < jobName.length(); i++) {
+                if (Character.isISOControl(jobName.charAt(i))) {
+                    throw new IllegalStateException(
+                        "job.name must not contain control characters "
+                        + "(\\n, \\t, \\0, etc.) — got one at offset " + i);
+                }
+            }
+            int bytes = jobName.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+            if (bytes > Sanitizer.MAX_LABEL_VALUE_BYTES) {
+                throw new IllegalStateException(
+                    "job.name is " + bytes + " UTF-8 bytes; must not exceed "
+                    + Sanitizer.MAX_LABEL_VALUE_BYTES
+                    + " (Prometheus label-value cap). Pick a shorter value.");
             }
         }
     }
@@ -454,6 +480,7 @@ public class PrometheusRemoteWriterConfig {
         diffStr(out, "write.url",                 other.writeUrl,              writeUrl);
         diffStr(out, "read.url",                  other.readUrl,               readUrl);
         diffStr(out, "instance.id",               other.instanceId,            instanceId);
+        diffStr(out, "job.name",                  other.jobName,               jobName);
         diffStr(out, "auth.basic.username",       other.basicUsername,         basicUsername);
         diffMasked(out, "auth.basic.password",    other.basicPassword,         basicPassword);
         diffMasked(out, "auth.bearer.token",      other.bearerToken,           bearerToken);
@@ -490,6 +517,7 @@ public class PrometheusRemoteWriterConfig {
     public void setWriteUrl(String v)              { writeUrl = blankToNull(v); }
     public void setReadUrl(String v)               { readUrl = blankToNull(v); }
     public void setInstanceId(String v)            { instanceId = blankToNull(v); }
+    public void setJobName(String v)               { jobName = blankToNull(v); }
     public void setBasicUsername(String v)         { basicUsername = blankToNull(v); }
     public void setBasicPassword(String v)         { basicPassword = blankToNull(v); }
     public void setBearerToken(String v)           { bearerToken = blankToNull(v); }
@@ -556,6 +584,7 @@ public class PrometheusRemoteWriterConfig {
     public String  getWriteUrl()              { return writeUrl; }
     public String  getReadUrl()               { return readUrl; }
     public String  getInstanceId()            { return instanceId; }
+    public String  getJobName()               { return jobName; }
     public String  getBasicUsername()         { return basicUsername; }
     public String  getBasicPassword()         { return basicPassword; }
     public String  getBearerToken()           { return bearerToken; }

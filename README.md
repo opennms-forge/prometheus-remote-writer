@@ -52,9 +52,11 @@ corresponding source data is available:
 | Label | Source | Notes |
 |---|---|---|
 | `onms_instance_id` | config `instance.id` | Only emitted when `instance.id` is set. See "Identifying samples from multiple OpenNMS instances". |
+| `job` | derived from `resourceId` shape (or config `job.name` override) | `"snmp"` for most SNMP-collected data, `"jmx"` for slash-FS `jmx-*` / `opennms-jvm` groups, `"opennms"` catch-all for unparseable shapes. Override with `job.name = <constant>` to force a fleet-wide value. See "Cross-source filtering". |
 | `__name__` | intrinsic `name` | Sanitized to Prom's metric-name grammar. |
 | `resourceId` | intrinsic `resourceId` | Raw, lossless. |
 | `node` | derived | `"<foreignSource>:<foreignId>"` when both are set; numeric dbId otherwise. |
+| `instance` | same value as `node` | Prom-idiomatic subject-identity label for mixed-backend filtering. Emitted iff `node` is emitted. See "Cross-source filtering". |
 | `node_label` | external `nodeLabel` | Human-readable. Mutable — disable via config if churn is a concern. |
 | `foreign_source` | external | Stable. |
 | `foreign_id` | external | Stable. |
@@ -415,6 +417,10 @@ and take effect on the next flush cycle — no OpenNMS restart required.
 write.url                     = https://<backend>/api/v1/push
 read.url                      = https://<backend>/prometheus
 
+# Source identity
+instance.id                   =
+job.name                      =
+
 # Authentication — Basic and Bearer are mutually exclusive; the plugin
 # refuses to start if both are configured.
 auth.basic.username           =
@@ -498,11 +504,6 @@ another copy target is rejected at startup with an actionable error.
 **Common `labels.copy` recipes:**
 
 ```properties
-# Dashboard portability — Prometheus-idiomatic dashboards filter on
-# `instance`; OpenNMS samples carry `node`. Emit both so existing
-# node-exporter-style dashboards work without rewriting queries.
-labels.copy = node -> instance
-
 # Multi-tenant Mimir — emit `tenant` as a copy of `foreign_source` so
 # per-requisition dashboards and the backend's tenant-id convention
 # both key off the same value.
@@ -514,11 +515,60 @@ labels.copy = foreign_source -> tenant
 labels.copy = node -> old_node_id
 ```
 
+> **Note:** `labels.copy = node -> instance` was a common v0.3 recipe. As of
+> v0.4 the plugin emits `instance` as a default (mirror of `node`), so the
+> directive is redundant — and would be rejected at startup because `instance`
+> is now a reserved target. If you don't want the `instance` label emitted,
+> opt out with `labels.exclude = instance` (or `labels.exclude = instance, job`
+> to opt out of both new v0.4 defaults).
+
 If you want the value under a new name AND you want to drop the original,
 use `labels.rename` — it does both in one directive. A `labels.copy` source
 that doesn't exist at copy time (typo, or a label the plugin never emits on
 this deployment) produces a single startup `WARN` naming the unknown source;
 it does not block startup.
+
+**Cross-source filtering.** As of v0.4 the plugin emits `job` and `instance`
+as default labels so dashboards that compose OpenNMS data with node-exporter,
+OTel, or other Prometheus data sources in the same backend can use the
+standard idiom:
+
+```promql
+# All OpenNMS-SNMP interface traffic for a specific node
+{job="snmp", instance="NOC:router-42", __name__="ifHCInOctets"}
+
+# Scope across data sources: everything about a host
+{instance=~"NOC:router-42|10.0.0.1:9100"}
+
+# Or by data source type
+{job=~"snmp|node-exporter"}
+```
+
+The plugin's `instance` value carries the OpenNMS-managed device identity
+(`<foreignSource>:<foreignId>` when requisitioned, or the numeric dbId),
+whereas node-exporter emits `instance="<host>:<port>"` — same label name,
+different value shapes for the same physical device. Cross-source value
+correlation (same label value across sources for the same device) requires
+backend `relabel_config`; the shared label *name* alone doesn't bridge value
+shapes. `job` is the primary cross-source scoping filter.
+
+The `job` value is derived from each sample's `resourceId` pattern — `snmp`
+for bracketed and slash-path SNMP-originated data, `jmx` for `snmp/fs/…/jmx-*`
+or `opennms-jvm` groups (prefix match on the literal `jmx-`, not a shell
+glob), and `opennms` as a catch-all for unparseable shapes. Set
+`job.name = <constant>` in the cfg to override the derivation with a
+fleet-wide constant value (useful when you want every sample from one plugin
+instance under the same job, e.g., `job.name = opennms-prod`).
+
+> **Operator note on the `opennms` catch-all**: samples whose `resourceId`
+> isn't recognised by any of the three grammars fall through to
+> `job="opennms"` as the default. Samples from distinct upstream sources
+> that share the same metric name and land in this catch-all *will* collide
+> into a single time series (same `{__name__, job="opennms"}` identity, no
+> distinguishing labels). If you see an unexpectedly high proportion of
+> samples with `job="opennms"` in your backend, treat it as a signal that
+> the parser is missing a real-world resourceId shape — open an issue with
+> the offending string.
 
 **Metadata gating.** `metadata.enabled = true` opts into the OpenNMS metadata
 passthrough. The built-in denylist (`*password*`, `*secret*`, `*token*`,
