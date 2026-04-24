@@ -218,6 +218,37 @@ class WalHardeningTest {
         }
     }
 
+    // --- H4: rotate() failure leaves writer recoverable ---------------------
+
+    @Test
+    void writer_survives_rotation_failure_with_stale_file(@TempDir Path dir) throws IOException {
+        // Pre-plant a stale file at the expected next-segment path so
+        // WalSegment.create's CREATE_NEW fails during rotation. This
+        // simulates a crashed prior rotation that left an orphan file.
+        long segmentSize = 200;
+        try (WalWriter w = WalWriter.createNew(dir, segmentSize, 1L << 30,
+                OverflowPolicy.BACKPRESSURE, FsyncPolicy.BATCH, MAX_PAYLOAD)) {
+            byte[] payload = new byte[100];
+            w.append(payload);               // seg 0: 108 bytes, no rotation
+            // Pre-plant the file that rotation will try to create next.
+            // The expected next startOffset will be active.endOffset()
+            // after the NEXT append = 216. Plant "00...000216.seg".
+            Files.createFile(WalSegment.segPathFor(dir, 216));
+
+            // This append pushes seg 0 past the threshold — triggers
+            // rotate() which tries to create segment starting at 216,
+            // fails. Writer must NOT be permanently wedged.
+            assertThatThrownBy(() -> w.append(payload))
+                    .isInstanceOf(IOException.class);
+
+            // Remove the obstacle and retry — writer should now rotate
+            // successfully (the previous append to seg 0 actually
+            // landed; only the subsequent rotate failed).
+            Files.deleteIfExists(WalSegment.segPathFor(dir, 216));
+            w.append(payload); // success now
+        }
+    }
+
     // --- Helpers ------------------------------------------------------------
 
     private static long firstSegmentStart(Path dir) throws IOException {

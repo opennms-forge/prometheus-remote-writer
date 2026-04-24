@@ -339,12 +339,42 @@ public final class WalWriter implements Closeable {
 
     /**
      * Rotate: seal the current segment, create a new one starting where
-     * the old one ended.
+     * the old one ended. If creating the new segment fails (e.g., a
+     * stale file from a prior crashed rotation already exists at the
+     * expected path), reopen the just-closed segment for append so the
+     * writer remains usable rather than wedged. The exception is still
+     * propagated so the caller knows the rotation didn't land — they
+     * may retry the append, which will try the check-and-rotate path
+     * again.
      */
     private void rotate() throws IOException {
         long nextStart = active.endOffset();
-        active.close(); // seals and rewrites .idx with final state
-        active = WalSegment.create(dir, nextStart, fsync, maxPayload);
+        WalSegment old = active;
+        old.close(); // seals and rewrites .idx with final state
+        try {
+            active = WalSegment.create(dir, nextStart, fsync, maxPayload);
+        } catch (IOException e) {
+            // New-segment creation failed. Reopen the just-closed
+            // segment so the writer can continue appending; subsequent
+            // appends will cross the size threshold again and re-enter
+            // rotate(), giving the operator / filesystem a retry
+            // opportunity. Rethrow so the current append sees the error.
+            try {
+                active = WalSegment.openForAppend(old.segPath(), old.startOffset(),
+                        fsync, maxPayload, old.sampleCount());
+            } catch (IOException reopen) {
+                // Couldn't recover the old segment either — the writer
+                // is genuinely stuck. Restore the closed reference so
+                // ensureOpen still works; the next append will surface
+                // "segment is closed" which is at least an honest error.
+                active = old;
+                IOException combined = new IOException(
+                    "rotation failed and could not reopen previous segment", e);
+                combined.addSuppressed(reopen);
+                throw combined;
+            }
+            throw e;
+        }
     }
 
     @Override
