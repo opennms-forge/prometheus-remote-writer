@@ -864,6 +864,153 @@ class PrometheusRemoteWriterConfigTest {
             .hasMessageContaining("'cluster'");
     }
 
+    // ---------- wal.* -------------------------------------------------------
+
+    @Test
+    void wal_defaults_match_the_design_contract() {
+        PrometheusRemoteWriterConfig c = minimal();
+        assertThat(c.isWalEnabled()).isFalse();
+        assertThat(c.getWalPath()).isEmpty();
+        assertThat(c.getWalMaxSizeBytes()).isEqualTo(536_870_912L); // 512 MB
+        assertThat(c.getWalSegmentSizeBytes()).isEqualTo(67_108_864L); // 64 MB
+        assertThat(c.getWalFsync())
+                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.BATCH);
+        assertThat(c.getWalOverflow())
+                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalWriter.OverflowPolicy.BACKPRESSURE);
+    }
+
+    @Test
+    void wal_disabled_skips_wal_validation_entirely() {
+        // When wal.enabled=false, invalid wal.* values are NOT rejected —
+        // they are simply ignored. Prevents operator frustration with
+        // "I turned WAL off but it still complains."
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setWalEnabled(false);
+        c.setWalMaxSizeBytes(-1);       // would be invalid if enabled
+        c.setWalSegmentSizeBytes(0);    // would be invalid if enabled
+        assertThatCode(c::validate).doesNotThrowAnyException();
+    }
+
+    @Test
+    void wal_enabled_with_minimal_extra_config_validates_cleanly() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setWalEnabled(true);
+        c.setWalPath("/tmp/test-wal-path"); // any non-blank path; resolveWalPath returns it
+        assertThatCode(c::validate).doesNotThrowAnyException();
+    }
+
+    @Test
+    void wal_fsync_parses_case_insensitively() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setWalFsync("always");
+        assertThat(c.getWalFsync())
+                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.ALWAYS);
+        c.setWalFsync("NEVER");
+        assertThat(c.getWalFsync())
+                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.NEVER);
+        c.setWalFsync("Batch");
+        assertThat(c.getWalFsync())
+                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.BATCH);
+    }
+
+    @Test
+    void wal_fsync_blank_defaults_to_batch() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setWalFsync("");
+        assertThat(c.getWalFsync())
+                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.BATCH);
+    }
+
+    @Test
+    void wal_fsync_rejects_unknown_value() {
+        PrometheusRemoteWriterConfig c = minimal();
+        assertThatThrownBy(() -> c.setWalFsync("sometimes"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("wal.fsync")
+                .hasMessageContaining("sometimes");
+    }
+
+    @Test
+    void wal_overflow_accepts_hyphen_and_underscore_forms() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setWalOverflow("drop-oldest");
+        assertThat(c.getWalOverflow())
+                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalWriter.OverflowPolicy.DROP_OLDEST);
+        c.setWalOverflow("DROP_OLDEST");
+        assertThat(c.getWalOverflow())
+                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalWriter.OverflowPolicy.DROP_OLDEST);
+        c.setWalOverflow("backpressure");
+        assertThat(c.getWalOverflow())
+                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalWriter.OverflowPolicy.BACKPRESSURE);
+    }
+
+    @Test
+    void wal_overflow_rejects_unknown_value() {
+        PrometheusRemoteWriterConfig c = minimal();
+        assertThatThrownBy(() -> c.setWalOverflow("lose-them-all"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("wal.overflow");
+    }
+
+    @Test
+    void validate_rejects_zero_or_negative_wal_max_size_when_enabled() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setWalEnabled(true);
+        c.setWalMaxSizeBytes(0);
+        assertThatThrownBy(c::validate)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("wal.max-size-bytes");
+    }
+
+    @Test
+    void validate_rejects_segment_size_exceeding_max_size() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setWalEnabled(true);
+        c.setWalMaxSizeBytes(1000);
+        c.setWalSegmentSizeBytes(2000);
+        assertThatThrownBy(c::validate)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("wal.segment-size-bytes")
+                .hasMessageContaining("wal.max-size-bytes");
+    }
+
+    @Test
+    void resolveWalPath_returns_explicit_path_when_set() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setWalPath("/var/lib/opennms/wal");
+        assertThat(c.resolveWalPath()).isEqualTo("/var/lib/opennms/wal");
+    }
+
+    @Test
+    void resolveWalPath_uses_karaf_data_system_property_when_blank() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setWalPath("");
+        String original = System.getProperty("karaf.data");
+        try {
+            System.setProperty("karaf.data", "/opt/opennms/data");
+            assertThat(c.resolveWalPath())
+                    .isEqualTo("/opt/opennms/data/prometheus-remote-writer/wal");
+        } finally {
+            if (original == null) System.clearProperty("karaf.data");
+            else System.setProperty("karaf.data", original);
+        }
+    }
+
+    @Test
+    void resolveWalPath_throws_when_blank_and_no_karaf_data() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setWalPath("");
+        String original = System.getProperty("karaf.data");
+        try {
+            System.clearProperty("karaf.data");
+            assertThatThrownBy(c::resolveWalPath)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("karaf.data");
+        } finally {
+            if (original != null) System.setProperty("karaf.data", original);
+        }
+    }
+
     // ---------- helpers -----------------------------------------------------
 
     private static PrometheusRemoteWriterConfig minimal() {
