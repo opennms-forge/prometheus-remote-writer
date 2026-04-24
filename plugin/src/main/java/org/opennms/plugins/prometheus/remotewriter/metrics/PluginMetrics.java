@@ -47,9 +47,9 @@ public final class PluginMetrics {
     public static final String WAL_REPLAY_SAMPLES              = "wal_replay_samples_total";
     public static final String WAL_BATCHES_DROPPED_4XX         = "wal_batches_dropped_4xx_total";
     public static final String SAMPLES_DROPPED_WAL_FULL        = "samples_dropped_wal_full_total";
+    public static final String WAL_FRAMES_DROPPED_CORRUPTED    = "wal_frames_dropped_corrupted_total";
     public static final String WAL_DISK_USAGE_BYTES            = "wal_disk_usage_bytes";
     public static final String WAL_SEGMENTS_ACTIVE             = "wal_segments_active";
-    public static final String WAL_OLDEST_SAMPLE_TS_MS         = "wal_oldest_sample_ts_ms";
 
     private final MetricRegistry registry = new MetricRegistry();
     private final Counter samplesWritten;
@@ -65,6 +65,7 @@ public final class PluginMetrics {
     private final Counter walReplaySamples;
     private final Counter walBatchesDropped4xx;
     private final Counter samplesDroppedWalFull;
+    private final Counter walFramesDroppedCorrupted;
 
     public PluginMetrics() {
         this.samplesWritten               = registry.counter(SAMPLES_WRITTEN);
@@ -79,6 +80,7 @@ public final class PluginMetrics {
         this.walReplaySamples             = registry.counter(WAL_REPLAY_SAMPLES);
         this.walBatchesDropped4xx         = registry.counter(WAL_BATCHES_DROPPED_4XX);
         this.samplesDroppedWalFull        = registry.counter(SAMPLES_DROPPED_WAL_FULL);
+        this.walFramesDroppedCorrupted    = registry.counter(WAL_FRAMES_DROPPED_CORRUPTED);
     }
 
     public MetricRegistry registry() { return registry; }
@@ -98,6 +100,7 @@ public final class PluginMetrics {
     public void walReplaySamples(long n)               { if (n > 0) walReplaySamples.inc(n); }
     public void walBatchesDropped4xx(long n)           { if (n > 0) walBatchesDropped4xx.inc(n); }
     public void samplesDroppedWalFull(long n)          { if (n > 0) samplesDroppedWalFull.inc(n); }
+    public void walFramesDroppedCorrupted(long n)      { if (n > 0) walFramesDroppedCorrupted.inc(n); }
 
     // ---- gauge registration (called by Storage on start) ------------------
 

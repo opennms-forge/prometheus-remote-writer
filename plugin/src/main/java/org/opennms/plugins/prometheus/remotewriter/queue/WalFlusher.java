@@ -156,6 +156,13 @@ public final class WalFlusher {
 
     /** Package-private for unit tests — runs one flush iteration synchronously. */
     void flushBatch(ReadResult batch) {
+        // Pass through any corruption-skip count from the reader so the
+        // operator sees a counter tick (the reader logs WARN; this
+        // surfaces it as a metric).
+        if (batch.corruptedFramesSkipped() > 0) {
+            metrics.walFramesDroppedCorrupted(batch.corruptedFramesSkipped());
+        }
+
         // Decode each WAL-framed payload into a MappedSample. Decode
         // failures are surfaced as hard errors; the codec already
         // rejects malformed payloads with an actionable message, so
@@ -216,20 +223,53 @@ public final class WalFlusher {
 
     /**
      * Checkpoint + GC + reader-floor advance after a SUCCESS or 4xx
-     * outcome. All three steps are idempotent against an already-
-     * advanced state, so a crash between any two steps reconciles on
-     * next startup (recovery re-reads the checkpoint and proceeds).
+     * outcome. The on-disk checkpoint is the source of truth — if its
+     * advance fails (e.g., disk full on checkpoint.json.tmp), reset the
+     * reader so the next cycle re-reads and retries the same batch
+     * rather than silently skipping it.
+     *
+     * <p>Reader-floor and GC are idempotent against an already-advanced
+     * checkpoint; a crash between any two steps reconciles on next
+     * startup.
      */
     private void advanceAfterBatch(long newOffset) {
+        long previousOffset = checkpoint.lastSentOffset();
         try {
             checkpoint.advance(newOffset);
+        } catch (IOException e) {
+            // Checkpoint failed to persist. The reader has already moved
+            // past these samples in-memory (nextBatch advanced it). If
+            // we ignore the failure, the batch is silently lost from the
+            // pipeline's POV (counted as "written" but checkpoint
+            // disagrees). Reset the reader to the last-good checkpoint
+            // so the next cycle re-reads and retries.
+            LOG.error("wal-checkpoint advance failed; resetting reader to "
+                    + "last-good offset {} for retry", previousOffset, e);
+            try {
+                reader.close();
+            } catch (IOException close) {
+                LOG.debug("wal-reader close during advance-fail reset: {}",
+                        close.getMessage());
+            }
+            reader = new WalReader(walDir, previousOffset, maxPayload);
+            return;
+        }
+
+        // Advance succeeded. Now best-effort: reader-floor and GC.
+        // Failures here only delay GC / floor updates; next successful
+        // batch re-runs them.
+        try {
             writer.setReaderOffsetFloor(newOffset);
+            long bytesPastCheckpoint = newOffset - previousOffset;
+            if (bytesPastCheckpoint > 0) {
+                metrics.walBytesCheckpointed(bytesPastCheckpoint);
+            }
             long reclaimed = Checkpoint.gcSegments(walDir, newOffset);
             if (reclaimed > 0) {
                 LOG.debug("wal-gc reclaimed {} bytes at checkpoint {}", reclaimed, newOffset);
             }
         } catch (IOException e) {
-            LOG.error("wal-checkpoint advance/GC failed", e);
+            LOG.warn("wal-gc failed (non-fatal — checkpoint advanced cleanly)", e);
         }
     }
 }

@@ -70,6 +70,7 @@ public final class WalReader implements Closeable {
         }
 
         List<byte[]> payloads = new ArrayList<>();
+        int corruptedFramesSkipped = 0;
         while (payloads.size() < maxSamples) {
             if (currentSegment == null && !openContainingSegment()) break;
 
@@ -119,6 +120,12 @@ public final class WalReader implements Closeable {
                             + "skipping to next segment; {} bytes of data in this segment may be lost",
                             currentSegment.segPath().getFileName(), currentOffset,
                             segEnd - currentOffset);
+                    // We don't know the exact frame count lost (the
+                    // segment is corrupt past this point), so the
+                    // counter is bumped by 1 per skip — operators see
+                    // "N corrupt-frame events," not "N samples lost."
+                    // Pair this with the WARN log for the byte count.
+                    corruptedFramesSkipped++;
                     currentOffset = segEnd;
                     currentSegment.close();
                     currentSegment = null;
@@ -129,7 +136,7 @@ public final class WalReader implements Closeable {
             }
         }
 
-        return new ReadResult(payloads, currentOffset);
+        return new ReadResult(payloads, currentOffset, corruptedFramesSkipped);
     }
 
     /** True if any segment on disk has startOffset > the given offset. */
@@ -271,8 +278,20 @@ public final class WalReader implements Closeable {
         if (closed) throw new IllegalStateException("reader is closed");
     }
 
-    /** Result of a {@link #nextBatch(int)} call. */
-    public record ReadResult(List<byte[]> payloads, long newOffset) {
+    /**
+     * Result of a {@link #nextBatch(int)} call.
+     *
+     * @param payloads               frames decoded successfully
+     * @param newOffset              global offset to checkpoint after a
+     *                               successful ship of these payloads
+     * @param corruptedFramesSkipped count of sealed segments the reader
+     *                               skipped past during this batch due
+     *                               to torn / bad-CRC frames mid-segment.
+     *                               Caller increments
+     *                               {@code wal_frames_dropped_corrupted_total}
+     *                               by this amount.
+     */
+    public record ReadResult(List<byte[]> payloads, long newOffset, int corruptedFramesSkipped) {
         public boolean isEmpty() { return payloads.isEmpty(); }
         public int size() { return payloads.size(); }
     }
