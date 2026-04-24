@@ -42,6 +42,7 @@ class StatsCommandTest {
         PluginMetrics metrics = new PluginMetrics();
         metrics.samplesWritten(42);
         metrics.samplesDropped4xx(3);
+        metrics.samplesUnparseableResourceId(5);
         metrics.registerLongGauge(PluginMetrics.QUEUE_DEPTH, () -> 7L);
 
         PrometheusRemoteWriterStorage storage = mock(PrometheusRemoteWriterStorage.class);
@@ -53,6 +54,8 @@ class StatsCommandTest {
         assertThat(out).contains("42");
         assertThat(out).contains("samples_dropped_4xx_total");
         assertThat(out).contains("3");
+        assertThat(out).contains("samples_unparseable_resource_id_total");
+        assertThat(out).contains("5");
         assertThat(out).contains("queue_depth");
         assertThat(out).contains("7");
         // Header
