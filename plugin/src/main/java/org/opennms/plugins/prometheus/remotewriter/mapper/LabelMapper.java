@@ -350,7 +350,11 @@ public final class LabelMapper {
         }
         if (resourceId.startsWith("snmp/fs/")) {
             String group = parsed.resourceType();
-            if ("opennms-jvm".equals(group) || group.startsWith("jmx-")) {
+            // In practice the three ResourceIdParser grammars are structurally
+            // disjoint and SLASH_FS's group-3 regex guarantees a non-null
+            // non-empty value. The null guard is defensive — cheaper than
+            // trusting a future parser refactor not to introduce nulls.
+            if (group != null && ("opennms-jvm".equals(group) || group.startsWith("jmx-"))) {
                 return "jmx";
             }
         }

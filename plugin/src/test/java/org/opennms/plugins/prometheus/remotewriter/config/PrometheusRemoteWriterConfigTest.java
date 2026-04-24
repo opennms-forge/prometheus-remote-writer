@@ -510,28 +510,30 @@ class PrometheusRemoteWriterConfigTest {
     @Test
     void copy_map_parses_single_entry() {
         PrometheusRemoteWriterConfig c = minimal();
-        c.setLabelsCopy("node -> instance");
+        c.setLabelsCopy("node -> cluster");
         assertThat(c.labelsCopyMap()).containsExactly(
-            Map.entry("node", List.of("instance")));
+            Map.entry("node", List.of("cluster")));
     }
 
     @Test
     void copy_map_parses_multiple_entries_with_whitespace() {
         PrometheusRemoteWriterConfig c = minimal();
-        c.setLabelsCopy("node->instance, foreign_source -> tenant ,  ");
+        c.setLabelsCopy("node->cluster, foreign_source -> tenant ,  ");
         assertThat(c.labelsCopyMap()).containsExactly(
-            Map.entry("node", List.of("instance")),
+            Map.entry("node", List.of("cluster")),
             Map.entry("foreign_source", List.of("tenant")));
     }
 
     @Test
     void copy_map_preserves_multiple_targets_from_same_source() {
         // Unlike labels.rename, two copies with the same 'from' are allowed:
-        // `node -> instance, node -> host` emits both instance and host.
+        // `node -> cluster, node -> host` emits both cluster and host. (Non-
+        // reserved target names picked so this test stays meaningful if a
+        // future refactor pipes validation into parsing.)
         PrometheusRemoteWriterConfig c = minimal();
-        c.setLabelsCopy("node -> instance, node -> host");
+        c.setLabelsCopy("node -> cluster, node -> host");
         assertThat(c.labelsCopyMap()).containsExactly(
-            Map.entry("node", List.of("instance", "host")));
+            Map.entry("node", List.of("cluster", "host")));
     }
 
     @Test
@@ -616,7 +618,7 @@ class PrometheusRemoteWriterConfigTest {
     @Test
     void copy_map_is_cached_across_repeated_calls() {
         PrometheusRemoteWriterConfig c = minimal();
-        c.setLabelsCopy("node -> instance");
+        c.setLabelsCopy("node -> cluster");
         Map<String, List<String>> first = c.labelsCopyMap();
         Map<String, List<String>> second = c.labelsCopyMap();
         assertThat(second).isSameAs(first);
@@ -636,7 +638,7 @@ class PrometheusRemoteWriterConfigTest {
     @Test
     void copy_map_cache_is_invalidated_on_setter_call() {
         PrometheusRemoteWriterConfig c = minimal();
-        c.setLabelsCopy("node -> instance");
+        c.setLabelsCopy("node -> cluster");
         Map<String, List<String>> before = c.labelsCopyMap();
         c.setLabelsCopy("foreign_source -> tenant");
         Map<String, List<String>> after = c.labelsCopyMap();
@@ -663,7 +665,7 @@ class PrometheusRemoteWriterConfigTest {
     @Test
     void blank_copy_setter_invalidates_and_caches_empty_map() {
         PrometheusRemoteWriterConfig c = minimal();
-        c.setLabelsCopy("node -> instance");
+        c.setLabelsCopy("node -> cluster");
         assertThat(c.labelsCopyMap()).hasSize(1);
         c.setLabelsCopy("   ");
         Map<String, List<String>> first = c.labelsCopyMap();

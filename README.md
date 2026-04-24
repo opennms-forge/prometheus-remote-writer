@@ -554,10 +554,21 @@ shapes. `job` is the primary cross-source scoping filter.
 
 The `job` value is derived from each sample's `resourceId` pattern — `snmp`
 for bracketed and slash-path SNMP-originated data, `jmx` for `snmp/fs/…/jmx-*`
-or `opennms-jvm` groups, and `opennms` as a catch-all for unparseable shapes.
-Set `job.name = <constant>` in the cfg to override the derivation with a
+or `opennms-jvm` groups (prefix match on the literal `jmx-`, not a shell
+glob), and `opennms` as a catch-all for unparseable shapes. Set
+`job.name = <constant>` in the cfg to override the derivation with a
 fleet-wide constant value (useful when you want every sample from one plugin
 instance under the same job, e.g., `job.name = opennms-prod`).
+
+> **Operator note on the `opennms` catch-all**: samples whose `resourceId`
+> isn't recognised by any of the three grammars fall through to
+> `job="opennms"` as the default. Samples from distinct upstream sources
+> that share the same metric name and land in this catch-all *will* collide
+> into a single time series (same `{__name__, job="opennms"}` identity, no
+> distinguishing labels). If you see an unexpectedly high proportion of
+> samples with `job="opennms"` in your backend, treat it as a signal that
+> the parser is missing a real-world resourceId shape — open an issue with
+> the offending string.
 
 **Metadata gating.** `metadata.enabled = true` opts into the OpenNMS metadata
 passthrough. The built-in denylist (`*password*`, `*secret*`, `*token*`,

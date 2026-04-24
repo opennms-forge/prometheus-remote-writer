@@ -393,20 +393,23 @@ class LabelMapperTest {
 
     @Test
     void copy_emits_source_under_additional_name() {
+        // Targets `cluster` (non-default, non-reserved) so the assertion
+        // genuinely exercises the copy stage. Using `instance` here would
+        // pass even if copy were broken — `instance` is a v0.4 default.
         PrometheusRemoteWriterConfig c = defaultConfig();
-        c.setLabelsCopy("node -> instance");
+        c.setLabelsCopy("node -> cluster");
         MappedSample out = new LabelMapper(c).map(interfaceSample());
         assertThat(out.labels()).containsEntry("node", "NOC:router-42");
-        assertThat(out.labels()).containsEntry("instance", "NOC:router-42");
+        assertThat(out.labels()).containsEntry("cluster", "NOC:router-42");
     }
 
     @Test
     void copy_multiple_targets_from_same_source_emits_all() {
         PrometheusRemoteWriterConfig c = defaultConfig();
-        c.setLabelsCopy("node -> instance, node -> host");
+        c.setLabelsCopy("node -> cluster, node -> host");
         MappedSample out = new LabelMapper(c).map(interfaceSample());
         assertThat(out.labels()).containsEntry("node", "NOC:router-42");
-        assertThat(out.labels()).containsEntry("instance", "NOC:router-42");
+        assertThat(out.labels()).containsEntry("cluster", "NOC:router-42");
         assertThat(out.labels()).containsEntry("host", "NOC:router-42");
     }
 
@@ -424,15 +427,17 @@ class LabelMapperTest {
 
     @Test
     void copy_composes_with_rename_on_same_source() {
-        // `copy = node -> instance, rename = node -> host` — copy runs first
+        // `copy = node -> cluster, rename = node -> host` — copy runs first
         // on pre-rename `node`, then rename moves `node` to `host`. Final:
-        // `host` (from rename) + `instance` (from copy), no `node`.
+        // `host` (from rename) + `cluster` (from copy), no `node`.
+        // `cluster` (not `instance`) so the copy stage is actually exercised;
+        // `instance` is a v0.4 default emission.
         PrometheusRemoteWriterConfig c = defaultConfig();
-        c.setLabelsCopy("node -> instance");
+        c.setLabelsCopy("node -> cluster");
         c.setLabelsRename("node -> host");
         MappedSample out = new LabelMapper(c).map(interfaceSample());
         assertThat(out.labels()).containsEntry("host", "NOC:router-42");
-        assertThat(out.labels()).containsEntry("instance", "NOC:router-42");
+        assertThat(out.labels()).containsEntry("cluster", "NOC:router-42");
         assertThat(out.labels()).doesNotContainKey("node");
     }
 
@@ -622,9 +627,13 @@ class LabelMapperTest {
 
     @Test
     void job_slash_fs_other_group_derives_to_snmp() {
+        // Fixture matches the delta-spec scenario literal (hrStorage, not
+        // hrStorageIndex). Both resolve to a non-jmx / non-opennms-jvm
+        // group, so both derive to "snmp" — alignment is for spec fidelity
+        // rather than behavior.
         Sample s = sample(ImmutableMetric.builder()
                 .intrinsicTag("name", "foo")
-                .intrinsicTag("resourceId", "snmp/fs/prod/server-01/hrStorageIndex/1"));
+                .intrinsicTag("resourceId", "snmp/fs/prod/server-01/hrStorage/1"));
         MappedSample out = DEFAULT_MAPPER.map(s);
         assertThat(out.labels()).containsEntry("job", "snmp");
     }
@@ -677,6 +686,35 @@ class LabelMapperTest {
         assertThat(out.labels()).containsEntry("job", "snmp");
     }
 
+    @Test
+    void labels_exclude_removes_default_job_and_instance() {
+        // Delta spec scenario "`job` and `instance` honor `labels.exclude`".
+        // Operator opts out of the two v0.4 defaults; all other default
+        // labels continue to emit.
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setLabelsExclude("job, instance");
+        MappedSample out = new LabelMapper(c).map(interfaceSample());
+        assertThat(out.labels()).doesNotContainKey("job");
+        assertThat(out.labels()).doesNotContainKey("instance");
+        // Other defaults still present.
+        assertThat(out.labels()).containsKey("__name__");
+        assertThat(out.labels()).containsKey("node");
+        assertThat(out.labels()).containsKey("foreign_source");
+    }
+
+    @Test
+    void job_name_with_sanitizable_characters_passes_through_sanitizer() {
+        // Sanitizer.labelValue accepts non-label-grammar characters as-is
+        // (label VALUES are less restricted than label NAMES; only
+        // byte-length and UTF-8-codepoint rules apply). So `job.name` with
+        // spaces, punctuation, etc. round-trips unchanged — no silent
+        // mangling of operator input.
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setJobName("ops team / production");
+        MappedSample out = new LabelMapper(c).map(interfaceSample());
+        assertThat(out.labels()).containsEntry("job", "ops team / production");
+    }
+
     // ---------- instance mirrors node (v0.4) --------------------------------
 
     @Test
@@ -698,12 +736,15 @@ class LabelMapperTest {
 
     @Test
     void instance_mirrors_node_for_numeric_db_id_fallback() {
+        // Fixture matches the delta-spec scenario value ("42") and its
+        // condition (unparseable resourceId + external nodeId).
         Sample s = sample(ImmutableMetric.builder()
                 .intrinsicTag("name", "foo")
-                .externalTag("nodeId", "7"));
+                .intrinsicTag("resourceId", "garbage-not-a-resource-id")
+                .externalTag("nodeId", "42"));
         MappedSample out = DEFAULT_MAPPER.map(s);
-        assertThat(out.labels()).containsEntry("node", "7");
-        assertThat(out.labels()).containsEntry("instance", "7");
+        assertThat(out.labels()).containsEntry("node", "42");
+        assertThat(out.labels()).containsEntry("instance", "42");
     }
 
     @Test
