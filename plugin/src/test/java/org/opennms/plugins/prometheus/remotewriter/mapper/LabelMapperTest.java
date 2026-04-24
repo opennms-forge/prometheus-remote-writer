@@ -762,6 +762,24 @@ class LabelMapperTest {
     }
 
     @Test
+    void counter_increments_for_sample_with_no_resource_id_at_all() {
+        // Delta spec scenario: "Counter increments for samples with no
+        // resourceId tag at all". Distinct from "unparseable resourceId" —
+        // the flag is set the same way (parsed == null) but the scenario
+        // deserves its own end-to-end bump-the-counter test so a future
+        // refactor that treats absent-tag differently from failed-parse
+        // surfaces as a named failure.
+        PluginMetrics metrics = new PluginMetrics();
+        LabelMapper mapper = new LabelMapper(defaultConfig(), metrics);
+
+        Sample s = sample(ImmutableMetric.builder().intrinsicTag("name", "foo"));
+        mapper.map(s);
+
+        assertThat(metrics.snapshot().get(PluginMetrics.SAMPLES_UNPARSEABLE_RESOURCE_ID).longValue())
+                .isEqualTo(1);
+    }
+
+    @Test
     void counter_increments_even_when_job_name_override_is_set() {
         // Counter tracks parser fallthrough rate — independent of whether the
         // derivation's "opennms" fallback value is actually surfaced as the

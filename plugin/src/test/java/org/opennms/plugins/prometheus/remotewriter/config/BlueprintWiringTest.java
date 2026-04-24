@@ -10,8 +10,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.io.InputStream;
 import java.lang.reflect.Method;
-import java.util.HashSet;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -35,16 +38,25 @@ import org.w3c.dom.NodeList;
  * Operators configuring {@code labels.copy} via their {@code .cfg} file got a
  * silent no-op.
  *
- * <p>This test parses the actual {@code blueprint.xml} and asserts two
+ * <p>This test parses the actual {@code blueprint.xml} and asserts three
  * invariants:
  * <ol>
  *   <li>Every {@code <property name="X" value="${...}"/>} binding on the
  *       {@code config} bean has a corresponding {@code setX(...)} method on
- *       {@link PrometheusRemoteWriterConfig}.</li>
+ *       {@link PrometheusRemoteWriterConfig} with at least one overload whose
+ *       argument type Blueprint can coerce from a placeholder String
+ *       (String, primitives, primitive wrappers, or an enum).</li>
  *   <li>Every {@code <cm:property name="Y">} entry in the property-placeholder
  *       defaults has a matching {@code <property value="${Y}">} binding on the
  *       {@code config} bean (and vice versa) — catches the "added on one side
- *       but not the other" failure mode that was v0.3's specific shape.</li>
+ *       but not the other" failure mode.</li>
+ *   <li>Every public Java setter on {@link PrometheusRemoteWriterConfig}
+ *       (except those explicitly exempted) has a matching
+ *       {@code <property name="X">} binding on the {@code config} bean.
+ *       This is the direction that catches the v0.3 {@code labels.copy}
+ *       regression shape: setter added, blueprint binding and cm:property
+ *       both missing — the two other checks above would have stayed silent
+ *       because nothing in the XML mentioned {@code labels.copy}.</li>
  * </ol>
  *
  * <p>A maintainer who adds a new knob without wiring every layer will see a
@@ -57,6 +69,16 @@ class BlueprintWiringTest {
     /** Matches {@code ${foo}} / {@code ${foo.bar}} inside a Blueprint value. */
     private static final Pattern PLACEHOLDER = Pattern.compile("\\$\\{([^}]+)}");
 
+    /**
+     * Setter names on {@link PrometheusRemoteWriterConfig} that are
+     * intentionally NOT exposed as Blueprint {@code <property>} bindings.
+     * Empty today — every setter is blueprint-bound. A maintainer adding a
+     * setter that must not be blueprint-bound (e.g., a test-only hook or a
+     * programmatic-only configuration knob) should add the property name here
+     * with a one-line comment explaining why.
+     */
+    private static final Set<String> SETTERS_NOT_BLUEPRINT_BOUND_BY_DESIGN = Set.of();
+
     @Test
     void every_config_bean_property_has_a_matching_java_setter() throws Exception {
         Document doc = loadBlueprint();
@@ -65,16 +87,60 @@ class BlueprintWiringTest {
             .as("config bean must have at least one <property> binding")
             .isNotEmpty();
 
-        Set<String> setters = collectSetterNames(PrometheusRemoteWriterConfig.class);
+        Map<String, List<Class<?>>> setters = collectSetters(PrometheusRemoteWriterConfig.class);
 
         for (String prop : beanProps) {
-            String setter = "set" + Character.toUpperCase(prop.charAt(0)) + prop.substring(1);
-            assertThat(setters)
+            List<Class<?>> overloads = setters.get(prop);
+            assertThat(overloads)
                 .as("blueprint.xml binds <property name=\"%s\"> but "
-                    + "PrometheusRemoteWriterConfig has no %s(...) method — "
-                    + "add the setter or remove the binding", prop, setter)
-                .contains(setter);
+                    + "PrometheusRemoteWriterConfig has no set%s(...) method — "
+                    + "add the setter or remove the binding",
+                    prop, capitalize(prop))
+                .isNotNull();
+
+            // Blueprint populates bean properties from String placeholder
+            // values. At least one setter overload must take a type Blueprint
+            // can coerce from a String, or the container rejects the bean at
+            // activation. This also guards against a refactor that drops the
+            // String-compatible overload from an overloaded pair (e.g.,
+            // removing setMetadataCase(String) and leaving only the enum form
+            // would break Blueprint binding).
+            assertThat(overloads.stream().anyMatch(BlueprintWiringTest::isBlueprintCoercibleFromString))
+                .as("blueprint.xml binds <property name=\"%s\"> but no set%s(...) "
+                    + "overload accepts a Blueprint-coercible type (String, "
+                    + "primitive, primitive wrapper, or enum). Existing overloads: %s",
+                    prop, capitalize(prop), overloads)
+                .isTrue();
         }
+    }
+
+    @Test
+    void every_java_setter_has_a_matching_blueprint_property_binding() throws Exception {
+        // This is the direction that catches the v0.3 labels.copy regression
+        // shape: the Java setter was added, but the blueprint binding AND
+        // the cm:property default were BOTH missing. Neither other test fires
+        // in that scenario — the XML makes no mention of labels.copy, so
+        // there's nothing to compare against a setter or a placeholder.
+        //
+        // The flip-side check here enumerates every public setter and asserts
+        // the blueprint binds it. A new operator-facing knob therefore MUST
+        // wire up the binding or be explicitly exempted.
+        Document doc = loadBlueprint();
+        Set<String> beanProps = collectConfigBeanPropertyNames(doc);
+        Map<String, List<Class<?>>> setters = collectSetters(PrometheusRemoteWriterConfig.class);
+
+        Set<String> unboundSetters = new LinkedHashSet<>(setters.keySet());
+        unboundSetters.removeAll(beanProps);
+        unboundSetters.removeAll(SETTERS_NOT_BLUEPRINT_BOUND_BY_DESIGN);
+
+        assertThat(unboundSetters)
+            .as("PrometheusRemoteWriterConfig has public setter(s) with no "
+                + "corresponding <property name=\"X\"> binding in blueprint.xml — "
+                + "operators configuring these via .cfg will get a silent no-op. "
+                + "Add the binding, or (if intentional) add the property name to "
+                + "SETTERS_NOT_BLUEPRINT_BOUND_BY_DESIGN with a comment explaining "
+                + "why.")
+            .isEmpty();
     }
 
     @Test
@@ -194,14 +260,39 @@ class BlueprintWiringTest {
         return out;
     }
 
-    private static Set<String> collectSetterNames(Class<?> clazz) {
-        Set<String> out = new HashSet<>();
+    /**
+     * Collect every public 1-arg setter as a map keyed by the JavaBean
+     * property name (i.e. {@code setWriteUrl} → {@code writeUrl}), with the
+     * parameter types of all overloads. This preserves information the
+     * previous name-only implementation erased: overloaded setters like
+     * {@code setMetadataCase(String)} plus {@code setMetadataCase(MetadataCase)}
+     * collapse to one map entry with two list elements — each test can inspect
+     * the overload list to assert what it needs.
+     */
+    private static Map<String, List<Class<?>>> collectSetters(Class<?> clazz) {
+        Map<String, List<Class<?>>> out = new LinkedHashMap<>();
         for (Method m : clazz.getMethods()) {
-            if (m.getName().startsWith("set") && m.getName().length() > 3
-                    && m.getParameterCount() == 1) {
-                out.add(m.getName());
-            }
+            if (!m.getName().startsWith("set") || m.getName().length() <= 3) continue;
+            if (m.getParameterCount() != 1) continue;
+            String prop = Character.toLowerCase(m.getName().charAt(3))
+                        + m.getName().substring(4);
+            out.computeIfAbsent(prop, k -> new ArrayList<>()).add(m.getParameterTypes()[0]);
         }
         return out;
+    }
+
+    private static boolean isBlueprintCoercibleFromString(Class<?> type) {
+        if (type == String.class) return true;
+        if (type.isPrimitive()) return true;
+        if (type == Boolean.class || type == Integer.class || type == Long.class
+                || type == Short.class || type == Byte.class || type == Double.class
+                || type == Float.class || type == Character.class) return true;
+        // Aries Blueprint coerces String → enum via Enum.valueOf.
+        if (type.isEnum()) return true;
+        return false;
+    }
+
+    private static String capitalize(String s) {
+        return Character.toUpperCase(s.charAt(0)) + s.substring(1);
     }
 }
