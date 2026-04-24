@@ -167,15 +167,20 @@ public final class WalSegment implements Closeable {
 
     /**
      * Scan frames forward from {@code fromGlobalOffset}, invoking the
-     * consumer on each payload. Stops at end-of-file OR at a torn frame.
-     * Returns the global offset one past the last successfully-decoded
-     * frame — the caller's new read position.
+     * consumer on each payload, up to {@code maxFrames} frames. Stops at
+     * end-of-file, at a torn frame, or when {@code maxFrames} is
+     * reached. Returns the global offset one past the last
+     * successfully-decoded frame — the caller's new read position.
+     *
+     * <p>Pass {@link Integer#MAX_VALUE} for {@code maxFrames} to disable
+     * the iteration bound (scan to end-of-segment).
      *
      * <p>The segment channel is repositioned by this method. Do not
      * interleave {@link #append} and {@link #scan} calls — the writer
      * should not be concurrently reading its active segment.
      */
-    public long scan(long fromGlobalOffset, Consumer<byte[]> consumer) throws IOException {
+    public long scan(long fromGlobalOffset, int maxFrames, Consumer<byte[]> consumer)
+            throws IOException {
         ensureOpen();
         if (fromGlobalOffset < startOffset) {
             throw new IllegalArgumentException(
@@ -188,7 +193,8 @@ public final class WalSegment implements Closeable {
                 "offset " + fromGlobalOffset + " is past segment end " + (startOffset + fileSize));
         }
         channel.position(fileOffset);
-        while (channel.position() < fileSize) {
+        int seen = 0;
+        while (channel.position() < fileSize && seen < maxFrames) {
             long beforeFrame = channel.position();
             byte[] payload = Frame.decode(channel, maxPayload);
             if (payload == null) {
@@ -197,8 +203,14 @@ public final class WalSegment implements Closeable {
                 return startOffset + beforeFrame;
             }
             consumer.accept(payload);
+            seen++;
         }
         return startOffset + channel.position();
+    }
+
+    /** Convenience overload: scan to end-of-segment without a bound. */
+    public long scan(long fromGlobalOffset, Consumer<byte[]> consumer) throws IOException {
+        return scan(fromGlobalOffset, Integer.MAX_VALUE, consumer);
     }
 
     /**
