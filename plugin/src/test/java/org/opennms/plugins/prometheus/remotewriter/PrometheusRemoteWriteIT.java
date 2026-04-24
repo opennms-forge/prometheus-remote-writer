@@ -329,15 +329,16 @@ class PrometheusRemoteWriteIT {
 
     @Test
     void labels_copy_emits_second_label_that_round_trips() throws Exception {
-        // labels.copy = node -> instance: the same value is emitted under
+        // labels.copy = node -> cluster: the same value is emitted under
         // two label names. Prometheus stores both; findMetrics surfaces both
-        // as meta tags with equal values.
+        // as meta tags with equal values. Uses `cluster` rather than
+        // `instance` because v0.4 reserved `instance` (now a default emit).
         storage.stop();
         PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
         String base = "http://" + prometheus.getHost() + ":" + prometheus.getMappedPort(9090);
         c.setWriteUrl(base + "/api/v1/write");
         c.setReadUrl(base);
-        c.setLabelsCopy("node -> instance");
+        c.setLabelsCopy("node -> cluster");
         c.setBatchSize(10);
         c.setFlushIntervalMs(100);
         c.setRetryInitialBackoffMs(100);
@@ -383,23 +384,24 @@ class PrometheusRemoteWriteIT {
             assertThat(t.getValue()).isEqualTo("NOC:it-copy");
         });
         assertThat(tags).anySatisfy(t -> {
-            assertThat(t.getKey()).isEqualTo("instance");
+            assertThat(t.getKey()).isEqualTo("cluster");
             assertThat(t.getValue()).isEqualTo("NOC:it-copy");
         });
     }
 
     @Test
     void labels_copy_combined_with_rename_emits_both_renamed_and_copied_labels() throws Exception {
-        // labels.copy = node -> instance AND labels.rename = node -> host:
+        // labels.copy = node -> cluster AND labels.rename = node -> host:
         // copy runs first on pre-rename `node`, rename then moves `node` to
-        // `host`. Both `host` and `instance` reach Prometheus with the same
-        // node value; `node` itself is gone.
+        // `host`. Both `host` and `cluster` reach Prometheus with the same
+        // node value; `node` itself is gone. Uses `cluster` rather than
+        // `instance` because v0.4 reserved `instance` (now a default emit).
         storage.stop();
         PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
         String base = "http://" + prometheus.getHost() + ":" + prometheus.getMappedPort(9090);
         c.setWriteUrl(base + "/api/v1/write");
         c.setReadUrl(base);
-        c.setLabelsCopy("node -> instance");
+        c.setLabelsCopy("node -> cluster");
         c.setLabelsRename("node -> host");
         c.setBatchSize(10);
         c.setFlushIntervalMs(100);
@@ -441,7 +443,7 @@ class PrometheusRemoteWriteIT {
         assertThat(found).hasSize(1);
 
         var keys = found.get(0).getMetaTags().stream().map(t -> t.getKey()).toList();
-        assertThat(keys).contains("host", "instance");
+        assertThat(keys).contains("host", "cluster");
         assertThat(keys).doesNotContain("node");
 
         assertThat(found.get(0).getMetaTags())
@@ -450,7 +452,7 @@ class PrometheusRemoteWriteIT {
                     assertThat(t.getValue()).isEqualTo("NOC:it-copyrename");
                 })
                 .anySatisfy(t -> {
-                    assertThat(t.getKey()).isEqualTo("instance");
+                    assertThat(t.getKey()).isEqualTo("cluster");
                     assertThat(t.getValue()).isEqualTo("NOC:it-copyrename");
                 });
     }

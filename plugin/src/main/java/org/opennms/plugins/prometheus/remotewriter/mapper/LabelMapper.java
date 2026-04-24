@@ -61,11 +61,16 @@ public final class LabelMapper {
     /**
      * Label names emitted unconditionally (modulo config) by {@link #buildDefaults}.
      * Used by {@link PrometheusRemoteWriterConfig#validate} to reject
-     * {@code labels.rename} entries whose target would silently clobber a
-     * default label at flush time.
+     * {@code labels.rename} AND {@code labels.copy} entries whose target would
+     * silently clobber a default label at flush time.
      *
      * <p>Keep in sync with {@link #buildDefaults} — a new default-label emission
      * added there must also land here, or operators lose the startup safety net.
+     *
+     * <p>{@code job} and {@code instance} are reserved as of v0.4 now that the
+     * plugin emits them as Prom-idiomatic defaults. Operators who previously
+     * used {@code labels.rename = foo -> instance} (unusual, since {@code instance}
+     * wasn't a default emission pre-v0.4) must pick a different target name.
      */
     public static final Set<String> RESERVED_LABEL_NAMES = Set.of(
             "__name__",
@@ -80,7 +85,9 @@ public final class LabelMapper {
             "if_name",
             "if_descr",
             "if_speed",
-            "onms_instance_id");
+            "onms_instance_id",
+            "instance",
+            "job");
 
     /**
      * Label-name prefixes reserved because multiple labels may be emitted

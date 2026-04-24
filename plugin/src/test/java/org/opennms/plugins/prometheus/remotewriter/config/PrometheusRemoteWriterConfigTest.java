@@ -714,7 +714,7 @@ class PrometheusRemoteWriterConfigTest {
         // maps, not parse-invocation count.
         PrometheusRemoteWriterConfig c = minimal();
         c.setLabelsRename("a -> b");
-        c.setLabelsCopy("node -> instance");
+        c.setLabelsCopy("foreign_source -> tenant");
         // Prime the cache by calling both once.
         Map<String, String> renameA = c.labelsRenameMap();
         Map<String, List<String>> copyA = c.labelsCopyMap();
@@ -753,9 +753,54 @@ class PrometheusRemoteWriterConfigTest {
 
     @Test
     void copy_to_non_reserved_name_validates() {
+        // `cluster` and `tenant` are unreserved; validate() accepts them.
         PrometheusRemoteWriterConfig c = minimal();
-        c.setLabelsCopy("node -> instance, foreign_source -> tenant");
+        c.setLabelsCopy("node -> cluster, foreign_source -> tenant");
         assertThatCode(c::validate).doesNotThrowAnyException();
+    }
+
+    @Test
+    void rename_target_instance_is_rejected() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsRename("foo -> instance");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.rename")
+            .hasMessageContaining("'instance'")
+            .hasMessageContaining("default label");
+    }
+
+    @Test
+    void rename_target_job_is_rejected() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsRename("foo -> job");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.rename")
+            .hasMessageContaining("'job'")
+            .hasMessageContaining("default label");
+    }
+
+    @Test
+    void copy_target_instance_is_rejected() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("foo -> instance");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.copy")
+            .hasMessageContaining("'instance'")
+            .hasMessageContaining("default label");
+    }
+
+    @Test
+    void copy_target_job_is_rejected() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("foo -> job");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.copy")
+            .hasMessageContaining("'job'")
+            .hasMessageContaining("default label");
     }
 
     @Test
@@ -793,13 +838,15 @@ class PrometheusRemoteWriterConfigTest {
 
     @Test
     void copy_target_collides_with_rename_target_is_rejected() {
+        // rename: node -> cluster (cluster isn't reserved)
+        // copy:   foreign_source -> cluster (cross-primitive collision on cluster)
         PrometheusRemoteWriterConfig c = minimal();
-        c.setLabelsRename("node -> instance");
-        c.setLabelsCopy("foreign_source -> instance");
+        c.setLabelsRename("node -> cluster");
+        c.setLabelsCopy("foreign_source -> cluster");
         assertThatThrownBy(c::validate)
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("labels.copy")
-            .hasMessageContaining("'instance'")
+            .hasMessageContaining("'cluster'")
             .hasMessageContaining("labels.rename");
     }
 
