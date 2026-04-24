@@ -166,7 +166,10 @@ class PrometheusRemoteWriteIT {
     @Test
     void instance_id_is_emitted_and_round_trips_through_prometheus() throws Exception {
         // Rebuild the storage with instance.id set — simulates one of multiple
-        // OpenNMS instances writing into the same backend.
+        // OpenNMS instances writing into the same backend. Uses a local
+        // override + try/finally so this test's storage is stopped
+        // deterministically, independent of the @AfterEach which targets the
+        // fixture's default-config storage.
         storage.stop();
         PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
         String base = "http://" + prometheus.getHost() + ":" + prometheus.getMappedPort(9090);
@@ -179,42 +182,45 @@ class PrometheusRemoteWriteIT {
         c.setRetryMaxAttempts(10);
         c.setShutdownGracePeriodMs(2_000);
         c.setInstanceId("it-test");
-        storage = new PrometheusRemoteWriterStorage(c);
-        storage.start();
+        PrometheusRemoteWriterStorage override = new PrometheusRemoteWriterStorage(c);
+        override.start();
+        try {
+            Instant now = Instant.now();
+            String metricName = "onms_it_id_" + System.nanoTime();
+            override.store(List.of(ImmutableSample.builder()
+                    .metric(ImmutableMetric.builder()
+                            .intrinsicTag("name", metricName)
+                            .intrinsicTag("resourceId", "node[1].nodeSnmp[]")
+                            .build())
+                    .time(now)
+                    .value(1.0)
+                    .build()));
 
-        Instant now = Instant.now();
-        String metricName = "onms_it_id_" + System.nanoTime();
-        storage.store(List.of(ImmutableSample.builder()
-                .metric(ImmutableMetric.builder()
-                        .intrinsicTag("name", metricName)
-                        .intrinsicTag("resourceId", "node[1].nodeSnmp[]")
-                        .build())
-                .time(now)
-                .value(1.0)
-                .build()));
+            PluginMetrics m = override.getMetrics();
+            await().atMost(Duration.ofSeconds(20))
+                   .until(() -> m.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue() >= 1L);
 
-        PluginMetrics m = storage.getMetrics();
-        await().atMost(Duration.ofSeconds(20))
-               .until(() -> m.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue() >= 1L);
+            TagMatcher nameMatcher = ImmutableTagMatcher.builder()
+                    .type(TagMatcher.Type.EQUALS)
+                    .key("name")
+                    .value(metricName)
+                    .build();
 
-        TagMatcher nameMatcher = ImmutableTagMatcher.builder()
-                .type(TagMatcher.Type.EQUALS)
-                .key("name")
-                .value(metricName)
-                .build();
+            List<Metric> found = await().atMost(Duration.ofSeconds(20))
+                    .until(() -> override.findMetrics(List.of(nameMatcher)),
+                           list -> !list.isEmpty());
+            assertThat(found).hasSize(1);
 
-        List<Metric> found = await().atMost(Duration.ofSeconds(20))
-                .until(() -> storage.findMetrics(List.of(nameMatcher)),
-                       list -> !list.isEmpty());
-        assertThat(found).hasSize(1);
-
-        // The onms_instance_id label is present on the round-tripped series
-        // with the value we configured.
-        var tags = found.get(0).getMetaTags();
-        assertThat(tags).anySatisfy(t -> {
-            assertThat(t.getKey()).isEqualTo("onms_instance_id");
-            assertThat(t.getValue()).isEqualTo("it-test");
-        });
+            // The onms_instance_id label is present on the round-tripped
+            // series with the value we configured.
+            var tags = found.get(0).getMetaTags();
+            assertThat(tags).anySatisfy(t -> {
+                assertThat(t.getKey()).isEqualTo("onms_instance_id");
+                assertThat(t.getValue()).isEqualTo("it-test");
+            });
+        } finally {
+            override.stop();
+        }
     }
 
     @Test
@@ -290,55 +296,58 @@ class PrometheusRemoteWriteIT {
         c.setRetryMaxBackoffMs(500);
         c.setRetryMaxAttempts(10);
         c.setShutdownGracePeriodMs(2_000);
-        storage = new PrometheusRemoteWriterStorage(c);
-        storage.start();
+        PrometheusRemoteWriterStorage override = new PrometheusRemoteWriterStorage(c);
+        override.start();
+        try {
+            Instant now = Instant.now();
+            String metricName = "onms_it_dedup_" + System.nanoTime();
+            Sample sample = ImmutableSample.builder()
+                    .metric(ImmutableMetric.builder()
+                            .intrinsicTag("name", metricName)
+                            .intrinsicTag("resourceId", "nodeSource[NOC:it-dedup].interfaceSnmp[eth0]")
+                            .externalTag("foreignSource", "NOC")
+                            .externalTag("foreignId", "it-dedup")
+                            .externalTag("nodeLabel", "it-dedup.example.com")
+                            .externalTag("location", "lab")
+                            .externalTag("ifName", "eth0")
+                            .externalTag("ifDescr", "GigabitEthernet0/0")
+                            .externalTag("ifHighSpeed", "1000")
+                            .externalTag("ifSpeed", "4294967295")
+                            .externalTag("nodeId", "42")
+                            .externalTag("categories", "Routers")
+                            .build())
+                    .time(now)
+                    .value(3.0)
+                    .build();
 
-        Instant now = Instant.now();
-        String metricName = "onms_it_dedup_" + System.nanoTime();
-        Sample sample = ImmutableSample.builder()
-                .metric(ImmutableMetric.builder()
-                        .intrinsicTag("name", metricName)
-                        .intrinsicTag("resourceId", "nodeSource[NOC:it-dedup].interfaceSnmp[eth0]")
-                        .externalTag("foreignSource", "NOC")
-                        .externalTag("foreignId", "it-dedup")
-                        .externalTag("nodeLabel", "it-dedup.example.com")
-                        .externalTag("location", "lab")
-                        .externalTag("ifName", "eth0")
-                        .externalTag("ifDescr", "GigabitEthernet0/0")
-                        .externalTag("ifHighSpeed", "1000")
-                        .externalTag("ifSpeed", "4294967295")
-                        .externalTag("nodeId", "42")
-                        .externalTag("categories", "Routers")
-                        .build())
-                .time(now)
-                .value(3.0)
-                .build();
+            override.store(List.of(sample));
 
-        storage.store(List.of(sample));
+            PluginMetrics m = override.getMetrics();
+            await().atMost(Duration.ofSeconds(20))
+                   .until(() -> m.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue() >= 1L);
 
-        PluginMetrics m = storage.getMetrics();
-        await().atMost(Duration.ofSeconds(20))
-               .until(() -> m.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue() >= 1L);
+            TagMatcher nameMatcher = ImmutableTagMatcher.builder()
+                    .type(TagMatcher.Type.EQUALS)
+                    .key("name")
+                    .value(metricName)
+                    .build();
 
-        TagMatcher nameMatcher = ImmutableTagMatcher.builder()
-                .type(TagMatcher.Type.EQUALS)
-                .key("name")
-                .value(metricName)
-                .build();
+            List<Metric> found = await().atMost(Duration.ofSeconds(20))
+                    .until(() -> override.findMetrics(List.of(nameMatcher)),
+                           list -> !list.isEmpty());
+            assertThat(found).hasSize(1);
 
-        List<Metric> found = await().atMost(Duration.ofSeconds(20))
-                .until(() -> storage.findMetrics(List.of(nameMatcher)),
-                       list -> !list.isEmpty());
-        assertThat(found).hasSize(1);
+            // The five v0.1 duplicates must NOT appear as meta tags.
+            var keys = found.get(0).getMetaTags().stream().map(t -> t.getKey()).toList();
+            assertThat(keys).doesNotContain("name", "resource_id", "if_high_speed", "node_id", "categories");
 
-        // The five v0.1 duplicates must NOT appear as meta tags.
-        var keys = found.get(0).getMetaTags().stream().map(t -> t.getKey()).toList();
-        assertThat(keys).doesNotContain("name", "resource_id", "if_high_speed", "node_id", "categories");
-
-        // The canonical defaults ARE still present.
-        assertThat(keys).contains(
-                "node", "foreign_source", "foreign_id", "node_label", "location",
-                "if_name", "if_descr", "if_speed", "onms_cat_Routers");
+            // The canonical defaults ARE still present.
+            assertThat(keys).contains(
+                    "node", "foreign_source", "foreign_id", "node_label", "location",
+                    "if_name", "if_descr", "if_speed", "onms_cat_Routers");
+        } finally {
+            override.stop();
+        }
     }
 
     @Test
@@ -359,48 +368,51 @@ class PrometheusRemoteWriteIT {
         c.setRetryMaxBackoffMs(500);
         c.setRetryMaxAttempts(10);
         c.setShutdownGracePeriodMs(2_000);
-        storage = new PrometheusRemoteWriterStorage(c);
-        storage.start();
+        PrometheusRemoteWriterStorage override = new PrometheusRemoteWriterStorage(c);
+        override.start();
+        try {
+            Instant now = Instant.now();
+            String metricName = "onms_it_copy_" + System.nanoTime();
+            Sample sample = ImmutableSample.builder()
+                    .metric(ImmutableMetric.builder()
+                            .intrinsicTag("name", metricName)
+                            .intrinsicTag("resourceId", "nodeSource[NOC:it-copy].interfaceSnmp[eth0]")
+                            .externalTag("foreignSource", "NOC")
+                            .externalTag("foreignId", "it-copy")
+                            .build())
+                    .time(now)
+                    .value(1.0)
+                    .build();
 
-        Instant now = Instant.now();
-        String metricName = "onms_it_copy_" + System.nanoTime();
-        Sample sample = ImmutableSample.builder()
-                .metric(ImmutableMetric.builder()
-                        .intrinsicTag("name", metricName)
-                        .intrinsicTag("resourceId", "nodeSource[NOC:it-copy].interfaceSnmp[eth0]")
-                        .externalTag("foreignSource", "NOC")
-                        .externalTag("foreignId", "it-copy")
-                        .build())
-                .time(now)
-                .value(1.0)
-                .build();
+            override.store(List.of(sample));
 
-        storage.store(List.of(sample));
+            PluginMetrics m = override.getMetrics();
+            await().atMost(Duration.ofSeconds(20))
+                   .until(() -> m.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue() >= 1L);
 
-        PluginMetrics m = storage.getMetrics();
-        await().atMost(Duration.ofSeconds(20))
-               .until(() -> m.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue() >= 1L);
+            TagMatcher nameMatcher = ImmutableTagMatcher.builder()
+                    .type(TagMatcher.Type.EQUALS)
+                    .key("name")
+                    .value(metricName)
+                    .build();
 
-        TagMatcher nameMatcher = ImmutableTagMatcher.builder()
-                .type(TagMatcher.Type.EQUALS)
-                .key("name")
-                .value(metricName)
-                .build();
+            List<Metric> found = await().atMost(Duration.ofSeconds(20))
+                    .until(() -> override.findMetrics(List.of(nameMatcher)),
+                           list -> !list.isEmpty());
+            assertThat(found).hasSize(1);
 
-        List<Metric> found = await().atMost(Duration.ofSeconds(20))
-                .until(() -> storage.findMetrics(List.of(nameMatcher)),
-                       list -> !list.isEmpty());
-        assertThat(found).hasSize(1);
-
-        var tags = found.get(0).getMetaTags();
-        assertThat(tags).anySatisfy(t -> {
-            assertThat(t.getKey()).isEqualTo("node");
-            assertThat(t.getValue()).isEqualTo("NOC:it-copy");
-        });
-        assertThat(tags).anySatisfy(t -> {
-            assertThat(t.getKey()).isEqualTo("cluster");
-            assertThat(t.getValue()).isEqualTo("NOC:it-copy");
-        });
+            var tags = found.get(0).getMetaTags();
+            assertThat(tags).anySatisfy(t -> {
+                assertThat(t.getKey()).isEqualTo("node");
+                assertThat(t.getValue()).isEqualTo("NOC:it-copy");
+            });
+            assertThat(tags).anySatisfy(t -> {
+                assertThat(t.getKey()).isEqualTo("cluster");
+                assertThat(t.getValue()).isEqualTo("NOC:it-copy");
+            });
+        } finally {
+            override.stop();
+        }
     }
 
     @Test
@@ -423,52 +435,55 @@ class PrometheusRemoteWriteIT {
         c.setRetryMaxBackoffMs(500);
         c.setRetryMaxAttempts(10);
         c.setShutdownGracePeriodMs(2_000);
-        storage = new PrometheusRemoteWriterStorage(c);
-        storage.start();
+        PrometheusRemoteWriterStorage override = new PrometheusRemoteWriterStorage(c);
+        override.start();
+        try {
+            Instant now = Instant.now();
+            String metricName = "onms_it_copyrename_" + System.nanoTime();
+            Sample sample = ImmutableSample.builder()
+                    .metric(ImmutableMetric.builder()
+                            .intrinsicTag("name", metricName)
+                            .intrinsicTag("resourceId", "nodeSource[NOC:it-copyrename].interfaceSnmp[eth0]")
+                            .externalTag("foreignSource", "NOC")
+                            .externalTag("foreignId", "it-copyrename")
+                            .build())
+                    .time(now)
+                    .value(2.0)
+                    .build();
 
-        Instant now = Instant.now();
-        String metricName = "onms_it_copyrename_" + System.nanoTime();
-        Sample sample = ImmutableSample.builder()
-                .metric(ImmutableMetric.builder()
-                        .intrinsicTag("name", metricName)
-                        .intrinsicTag("resourceId", "nodeSource[NOC:it-copyrename].interfaceSnmp[eth0]")
-                        .externalTag("foreignSource", "NOC")
-                        .externalTag("foreignId", "it-copyrename")
-                        .build())
-                .time(now)
-                .value(2.0)
-                .build();
+            override.store(List.of(sample));
 
-        storage.store(List.of(sample));
+            PluginMetrics m = override.getMetrics();
+            await().atMost(Duration.ofSeconds(20))
+                   .until(() -> m.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue() >= 1L);
 
-        PluginMetrics m = storage.getMetrics();
-        await().atMost(Duration.ofSeconds(20))
-               .until(() -> m.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue() >= 1L);
+            TagMatcher nameMatcher = ImmutableTagMatcher.builder()
+                    .type(TagMatcher.Type.EQUALS)
+                    .key("name")
+                    .value(metricName)
+                    .build();
 
-        TagMatcher nameMatcher = ImmutableTagMatcher.builder()
-                .type(TagMatcher.Type.EQUALS)
-                .key("name")
-                .value(metricName)
-                .build();
+            List<Metric> found = await().atMost(Duration.ofSeconds(20))
+                    .until(() -> override.findMetrics(List.of(nameMatcher)),
+                           list -> !list.isEmpty());
+            assertThat(found).hasSize(1);
 
-        List<Metric> found = await().atMost(Duration.ofSeconds(20))
-                .until(() -> storage.findMetrics(List.of(nameMatcher)),
-                       list -> !list.isEmpty());
-        assertThat(found).hasSize(1);
+            var keys = found.get(0).getMetaTags().stream().map(t -> t.getKey()).toList();
+            assertThat(keys).contains("host", "cluster");
+            assertThat(keys).doesNotContain("node");
 
-        var keys = found.get(0).getMetaTags().stream().map(t -> t.getKey()).toList();
-        assertThat(keys).contains("host", "cluster");
-        assertThat(keys).doesNotContain("node");
-
-        assertThat(found.get(0).getMetaTags())
-                .anySatisfy(t -> {
-                    assertThat(t.getKey()).isEqualTo("host");
-                    assertThat(t.getValue()).isEqualTo("NOC:it-copyrename");
-                })
-                .anySatisfy(t -> {
-                    assertThat(t.getKey()).isEqualTo("cluster");
-                    assertThat(t.getValue()).isEqualTo("NOC:it-copyrename");
-                });
+            assertThat(found.get(0).getMetaTags())
+                    .anySatisfy(t -> {
+                        assertThat(t.getKey()).isEqualTo("host");
+                        assertThat(t.getValue()).isEqualTo("NOC:it-copyrename");
+                    })
+                    .anySatisfy(t -> {
+                        assertThat(t.getKey()).isEqualTo("cluster");
+                        assertThat(t.getValue()).isEqualTo("NOC:it-copyrename");
+                    });
+        } finally {
+            override.stop();
+        }
     }
 
     @Test
@@ -538,43 +553,46 @@ class PrometheusRemoteWriteIT {
         c.setRetryMaxBackoffMs(500);
         c.setRetryMaxAttempts(10);
         c.setShutdownGracePeriodMs(2_000);
-        storage = new PrometheusRemoteWriterStorage(c);
-        storage.start();
+        PrometheusRemoteWriterStorage override = new PrometheusRemoteWriterStorage(c);
+        override.start();
+        try {
+            Instant now = Instant.now();
+            String metricName = "onms_it_jobname_" + System.nanoTime();
+            // Bracketed resourceId — would otherwise derive to job="snmp".
+            Sample sample = ImmutableSample.builder()
+                    .metric(ImmutableMetric.builder()
+                            .intrinsicTag("name", metricName)
+                            .intrinsicTag("resourceId", "nodeSource[NOC:it-jobname].interfaceSnmp[eth0]")
+                            .externalTag("foreignSource", "NOC")
+                            .externalTag("foreignId", "it-jobname")
+                            .build())
+                    .time(now)
+                    .value(1.0)
+                    .build();
 
-        Instant now = Instant.now();
-        String metricName = "onms_it_jobname_" + System.nanoTime();
-        // Bracketed resourceId — would otherwise derive to job="snmp".
-        Sample sample = ImmutableSample.builder()
-                .metric(ImmutableMetric.builder()
-                        .intrinsicTag("name", metricName)
-                        .intrinsicTag("resourceId", "nodeSource[NOC:it-jobname].interfaceSnmp[eth0]")
-                        .externalTag("foreignSource", "NOC")
-                        .externalTag("foreignId", "it-jobname")
-                        .build())
-                .time(now)
-                .value(1.0)
-                .build();
+            override.store(List.of(sample));
 
-        storage.store(List.of(sample));
+            PluginMetrics m = override.getMetrics();
+            await().atMost(Duration.ofSeconds(20))
+                   .until(() -> m.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue() >= 1L);
 
-        PluginMetrics m = storage.getMetrics();
-        await().atMost(Duration.ofSeconds(20))
-               .until(() -> m.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue() >= 1L);
+            TagMatcher nameMatcher = ImmutableTagMatcher.builder()
+                    .type(TagMatcher.Type.EQUALS)
+                    .key("name")
+                    .value(metricName)
+                    .build();
 
-        TagMatcher nameMatcher = ImmutableTagMatcher.builder()
-                .type(TagMatcher.Type.EQUALS)
-                .key("name")
-                .value(metricName)
-                .build();
+            List<Metric> found = await().atMost(Duration.ofSeconds(20))
+                    .until(() -> override.findMetrics(List.of(nameMatcher)),
+                           list -> !list.isEmpty());
+            assertThat(found).hasSize(1);
 
-        List<Metric> found = await().atMost(Duration.ofSeconds(20))
-                .until(() -> storage.findMetrics(List.of(nameMatcher)),
-                       list -> !list.isEmpty());
-        assertThat(found).hasSize(1);
-
-        assertThat(found.get(0).getMetaTags()).anySatisfy(t -> {
-            assertThat(t.getKey()).isEqualTo("job");
-            assertThat(t.getValue()).isEqualTo("opennms-prod");
-        });
+            assertThat(found.get(0).getMetaTags()).anySatisfy(t -> {
+                assertThat(t.getKey()).isEqualTo("job");
+                assertThat(t.getValue()).isEqualTo("opennms-prod");
+            });
+        } finally {
+            override.stop();
+        }
     }
 }
