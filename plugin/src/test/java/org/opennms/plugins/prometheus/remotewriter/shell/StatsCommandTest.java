@@ -62,6 +62,40 @@ class StatsCommandTest {
         assertThat(out).contains("prometheus-remote-writer metrics");
     }
 
+    @Test
+    void renders_wal_counters_and_gauges() {
+        // WAL-enabled deployments see the new wal_* metrics in the shell
+        // output alongside the existing counters. This pins that
+        // PluginMetrics.snapshot() enumerates every counter registered
+        // in the constructor — a regression that added a wal_* counter
+        // but forgot to register it would silently drop from stats.
+        PluginMetrics metrics = new PluginMetrics();
+        metrics.walBytesWritten(10_000);
+        metrics.walBytesCheckpointed(8_192);
+        metrics.walReplaySamples(4);
+        metrics.walBatchesDropped4xx(1);
+        metrics.samplesDroppedWalFull(123);
+        metrics.registerLongGauge(PluginMetrics.WAL_DISK_USAGE_BYTES, () -> 65_536L);
+        metrics.registerLongGauge(PluginMetrics.WAL_SEGMENTS_ACTIVE, () -> 3L);
+
+        PrometheusRemoteWriterStorage storage = mock(PrometheusRemoteWriterStorage.class);
+        when(storage.getMetrics()).thenReturn(metrics);
+
+        String out = capture(new StatsCommand(storage));
+
+        assertThat(out).contains("wal_bytes_written_total");
+        assertThat(out).contains("10000");
+        assertThat(out).contains("wal_bytes_checkpointed_total");
+        assertThat(out).contains("8192");
+        assertThat(out).contains("wal_replay_samples_total");
+        assertThat(out).contains("wal_batches_dropped_4xx_total");
+        assertThat(out).contains("samples_dropped_wal_full_total");
+        assertThat(out).contains("123");
+        assertThat(out).contains("wal_disk_usage_bytes");
+        assertThat(out).contains("65536");
+        assertThat(out).contains("wal_segments_active");
+    }
+
     private static String capture(StatsCommand cmd) {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         cmd.render(new PrintStream(baos, true, StandardCharsets.UTF_8));
