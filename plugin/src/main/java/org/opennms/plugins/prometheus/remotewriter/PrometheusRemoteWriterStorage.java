@@ -354,7 +354,8 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
     }
 
     private void storeToWal(Active a, List<Sample> samples) throws StorageException {
-        for (Sample s : samples) {
+        for (int i = 0; i < samples.size(); i++) {
+            Sample s = samples.get(i);
             MappedSample mapped = a.labelMapper().map(s);
             if (mapped == null) continue;
             byte[] encoded = WalEntryCodec.encode(mapped);
@@ -367,12 +368,33 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
                 // + 4-byte CRC = Frame.HEADER_BYTES + encoded.length.
                 a.metrics().walBytesWritten(org.opennms.plugins.prometheus.remotewriter.wal.Frame.HEADER_BYTES + encoded.length);
             } catch (WalFullException full) {
-                a.metrics().samplesDroppedWalFull(samples.size());
+                // Bump the counter by the number of samples actually
+                // refused — this sample plus any later ones the caller
+                // had queued. Using `samples.size()` would double-count
+                // samples that already landed earlier in this batch and
+                // could over-count by an entire batch on a typical
+                // multi-sample store() call. The eviction count carried
+                // on the exception covers any frames already evicted
+                // BEFORE the giving-up throw (rare; only when a single
+                // frame exceeds the entire cap).
+                int refused = samples.size() - i;
+                a.metrics().samplesDroppedWalFull(
+                    (long) refused + full.evictedFramesBeforeFailure());
                 throw new StorageException(
                     "WAL is full under backpressure policy (" + full.getMessage() + "); "
                     + "increase wal.max-size-bytes, switch to wal.overflow=drop-oldest, "
                     + "or resolve the downstream outage that is preventing drain",
                     full);
+            } catch (IllegalStateException stateEx) {
+                // Triggered when start() partially rolled back, or when
+                // stop() snapped the writer between SPI snapshot of
+                // Active and the appendWithStats call. Wrap as
+                // StorageException so OpenNMS sees a typed error rather
+                // than an unchecked exception.
+                throw new StorageException(
+                    "WAL writer is not in an appendable state ("
+                    + stateEx.getMessage() + ") — plugin may be stopping or "
+                    + "in a recovered-but-failed state", stateEx);
             } catch (IOException io) {
                 throw new StorageException("WAL append failed: " + io.getMessage(), io);
             }
