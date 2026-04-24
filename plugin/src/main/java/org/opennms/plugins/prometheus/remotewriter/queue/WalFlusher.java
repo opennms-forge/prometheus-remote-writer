@@ -102,29 +102,39 @@ public final class WalFlusher {
      * anything unfinished is durable on disk and replays on next start.
      */
     public synchronized void stop(long graceMs) {
-        if (!running) return;
-        running = false;
-        Thread t = thread;
-        if (t == null) return;
+        // Close the reader regardless of whether the loop ever started.
+        // The constructor eagerly creates `reader`, so a stop() called
+        // after a failed start() (e.g., from rollbackStart) without a
+        // matching start() must still release the FD — early-returning
+        // on `!running` would leak it.
         try {
-            t.join(Math.max(1, graceMs));
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-        if (t.isAlive()) {
-            LOG.warn("wal-flusher did not stop within {}ms, interrupting", graceMs);
-            t.interrupt();
-            try {
-                t.join(1_000);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+            if (running) {
+                running = false;
+                Thread t = thread;
+                if (t != null) {
+                    try {
+                        t.join(Math.max(1, graceMs));
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    if (t.isAlive()) {
+                        LOG.warn("wal-flusher did not stop within {}ms, interrupting", graceMs);
+                        t.interrupt();
+                        try {
+                            t.join(1_000);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                    }
+                    thread = null;
+                }
             }
-        }
-        thread = null;
-        try {
-            reader.close();
-        } catch (IOException e) {
-            LOG.debug("wal-reader close: {}", e.getMessage());
+        } finally {
+            try {
+                reader.close();
+            } catch (IOException e) {
+                LOG.debug("wal-reader close: {}", e.getMessage());
+            }
         }
     }
 

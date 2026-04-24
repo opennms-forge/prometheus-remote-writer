@@ -222,11 +222,26 @@ public final class WalWriter implements Closeable {
         return new AppendResult(offsetAfter, evictedBytes, evictedFrames);
     }
 
-    /** Computes the current total on-disk size of all segments. */
+    /**
+     * Computes the current total on-disk size of all segments.
+     *
+     * <p>Tolerates concurrent deletes: a segment file may vanish
+     * between the directory listing and the {@link Files#size} call
+     * (e.g., the Flusher's {@code Checkpoint.gcSegments} ran on another
+     * thread). Such an entry contributes 0 to the total — its bytes
+     * are no longer on disk, which is the correct accounting answer
+     * for a sum that's about to feed an overflow check.
+     */
     public synchronized long currentTotalBytes() throws IOException {
         long total = 0;
         try (DirectoryStream<Path> s = Files.newDirectoryStream(dir, "*" + WalSegment.SEG_EXT)) {
-            for (Path p : s) total += Files.size(p);
+            for (Path p : s) {
+                try {
+                    total += Files.size(p);
+                } catch (java.nio.file.NoSuchFileException vanished) {
+                    // GC raced us; the file is gone, contributes 0.
+                }
+            }
         }
         return total;
     }
