@@ -11,6 +11,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.TimeUnit;
 
 import org.opennms.plugins.prometheus.remotewriter.http.RemoteWriteHttpClient;
 import org.opennms.plugins.prometheus.remotewriter.http.RemoteWriteHttpClient.WriteOutcome;
@@ -75,10 +76,17 @@ public final class WalFlusher {
     /**
      * Cumulative count of samples drained from the WAL but not yet
      * checkpointed. Bumped per-batch when nextBatch returns payloads;
-     * decremented (clamped to zero) on each successful advance.
-     * Single-thread access (the flusher loop), so a plain int is fine.
+     * cleared to zero on each successful advance and on each
+     * reader-rewind (5xx/transport / advance-fail) so the count
+     * never spans batches that haven't actually been acknowledged.
+     *
+     * <p>Volatile because {@link #pendingSampleCount()} reads it from
+     * the bundle stop-thread before that thread invokes
+     * {@link #stop(long)}; without the volatile the JMM would permit
+     * stale reads. (32-bit int writes are atomic on the JVM, so torn
+     * reads are not the concern — only visibility.)
      */
-    private int samplesDrainedSinceLastCheckpoint;
+    private volatile int samplesDrainedSinceLastCheckpoint;
 
     public WalFlusher(Path walDir, WalWriter writer, Checkpoint checkpoint,
                       int maxPayload, RemoteWriteHttpClient httpClient,
@@ -166,8 +174,27 @@ public final class WalFlusher {
     private void run() {
         LOG.info("wal-flusher started (batchSize={}, flushIntervalMs={}, resumeOffset={})",
                 batchSize, flushIntervalMs, checkpoint.lastSentOffset());
+        long lastFlushNanos = System.nanoTime();
+        long flushIntervalNanos = TimeUnit.MILLISECONDS.toNanos(flushIntervalMs);
         while (running) {
             try {
+                // Trigger writer.flush() on each flush-interval boundary
+                // so wal.fsync=batch actually delivers the documented
+                // "fsync at flush-interval" durability. WalSegment.flush
+                // is a no-op under wal.fsync=never and a force(false)
+                // under always|batch — the policy gate lives in the
+                // segment, not here.
+                long now = System.nanoTime();
+                if (now - lastFlushNanos >= flushIntervalNanos) {
+                    try {
+                        writer.flush();
+                    } catch (IOException e) {
+                        LOG.warn("wal-writer flush failed; samples since last "
+                                + "fsync may be lost on a kernel-level crash", e);
+                    }
+                    lastFlushNanos = now;
+                }
+
                 ReadResult batch = reader.nextBatch(batchSize);
                 if (batch.isEmpty()) {
                     Thread.sleep(flushIntervalMs);
@@ -211,25 +238,30 @@ public final class WalFlusher {
         if (!built.hasContent()) {
             // No payload to POST (every sample was dropped as non-finite
             // / duplicate). Still advance the checkpoint — the samples
-            // were WAL-durable and are now accounted for.
-            advanceAfterBatch(batch.newOffset());
+            // were WAL-durable and are now accounted for. samplesWritten
+            // is already 0 here, so the success-branch tick is a no-op.
+            advanceAfterBatch(batch.newOffset(), BatchOutcome.success(0));
             return;
         }
 
         WriteResult result = httpClient.write(built.compressedPayload());
         switch (result.outcome()) {
             case SUCCESS -> {
-                metrics.samplesWritten(built.samplesWritten());
                 LOG.debug("wal-flushed {} samples in {} bytes on attempt {}",
                         built.samplesWritten(), built.compressedPayload().length, result.attemptsMade());
-                advanceAfterBatch(batch.newOffset());
+                // Counter ticks for SUCCESS/4xx are deferred to
+                // advanceAfterBatch — they fire only when the on-disk
+                // checkpoint actually persists. If advance fails the
+                // reader rewinds and the batch re-ships next cycle,
+                // and we don't want to double-count.
+                advanceAfterBatch(batch.newOffset(),
+                        BatchOutcome.success(built.samplesWritten()));
             }
             case DROPPED_4XX -> {
-                metrics.samplesDropped4xx(built.samplesWritten());
-                metrics.walBatchesDropped4xx(1);
                 LOG.warn("wal-dropped batch of {} samples after 4xx: status={}",
                         built.samplesWritten(), result.httpStatus());
-                advanceAfterBatch(batch.newOffset());
+                advanceAfterBatch(batch.newOffset(),
+                        BatchOutcome.dropped4xx(built.samplesWritten()));
             }
             case DROPPED_5XX_EXHAUSTED, TRANSPORT_ERROR -> {
                 if (result.outcome() == WriteOutcome.DROPPED_5XX_EXHAUSTED) {
@@ -241,54 +273,75 @@ public final class WalFlusher {
                             + "{} — WAL holds the data; will retry next cycle",
                             built.samplesWritten(), result.detail());
                 }
-                // Reset the reader to the checkpoint so the next cycle
-                // re-reads the same bytes. Close the old reader's channel.
-                try {
-                    reader.close();
-                } catch (IOException e) {
-                    LOG.debug("wal-reader close during retry-reset: {}", e.getMessage());
-                }
-                reader = new WalReader(walDir, checkpoint.lastSentOffset(), maxPayload);
+                rewindReader(checkpoint.lastSentOffset(), "retry-after-fail");
             }
         }
     }
 
     /**
-     * Checkpoint + GC + reader-floor advance after a SUCCESS or 4xx
-     * outcome. The on-disk checkpoint is the source of truth — if its
-     * advance fails (e.g., disk full on checkpoint.json.tmp), reset the
-     * reader so the next cycle re-reads and retries the same batch
-     * rather than silently skipping it.
-     *
-     * <p>Reader-floor and GC are idempotent against an already-advanced
-     * checkpoint; a crash between any two steps reconciles on next
-     * startup.
+     * Carrier for "what counters need to tick when the checkpoint
+     * advance succeeds." Ticking these BEFORE advance would over-count
+     * on a transient advance failure that triggers a reader-rewind +
+     * retry — same samples would re-ship, counters would tick again.
      */
-    private void advanceAfterBatch(long newOffset) {
+    private record BatchOutcome(boolean success, int samplesWritten, int samplesDropped4xx) {
+        static BatchOutcome success(int n)    { return new BatchOutcome(true,  n, 0); }
+        static BatchOutcome dropped4xx(int n) { return new BatchOutcome(false, 0, n); }
+    }
+
+    /**
+     * Reset the reader to the given offset, releasing the current
+     * channel. Pre-pins the writer's reader-offset floor BEFORE
+     * constructing the new reader so a concurrent DROP_OLDEST eviction
+     * can't trash the segments the reset reader is about to scan.
+     * Also clears {@link #samplesDrainedSinceLastCheckpoint} — those
+     * samples are about to be re-read.
+     */
+    private void rewindReader(long offset, String reason) {
+        // Pin the floor first to prevent any eviction race with the
+        // about-to-be-constructed reader.
+        writer.setReaderOffsetFloor(offset);
+        try {
+            reader.close();
+        } catch (IOException e) {
+            LOG.debug("wal-reader close during rewind ({}): {}", reason, e.getMessage());
+        }
+        reader = new WalReader(walDir, offset, maxPayload);
+        // Pending counter is in-memory only; on rewind those samples
+        // will be re-read and re-counted in the next batch.
+        samplesDrainedSinceLastCheckpoint = 0;
+    }
+
+    /**
+     * Advance the on-disk checkpoint to {@code newOffset}. On success,
+     * tick the carrier's deferred counters, advance the writer's
+     * reader-floor, and run a GC pass for shipped segments. On
+     * failure, rewind the reader to the previous checkpoint so the
+     * batch re-ships next cycle (and counters never tick for the
+     * un-acked attempt).
+     */
+    private void advanceAfterBatch(long newOffset, BatchOutcome outcome) {
         long previousOffset = checkpoint.lastSentOffset();
         try {
             checkpoint.advance(newOffset);
-        } catch (IOException e) {
-            // Checkpoint failed to persist. The reader has already moved
-            // past these samples in-memory (nextBatch advanced it). If
-            // we ignore the failure, the batch is silently lost from the
-            // pipeline's POV (counted as "written" but checkpoint
-            // disagrees). Reset the reader to the last-good checkpoint
-            // so the next cycle re-reads and retries.
+        } catch (IOException | RuntimeException e) {
+            // Includes IllegalArgumentException (programming-bug
+            // backward move) and any future runtime exception from
+            // Checkpoint.advance — never silently lose a batch.
             LOG.error("wal-checkpoint advance failed; resetting reader to "
                     + "last-good offset {} for retry", previousOffset, e);
-            try {
-                reader.close();
-            } catch (IOException close) {
-                LOG.debug("wal-reader close during advance-fail reset: {}",
-                        close.getMessage());
-            }
-            reader = new WalReader(walDir, previousOffset, maxPayload);
+            rewindReader(previousOffset, "advance-fail");
             return;
         }
 
-        // Advance succeeded. Reset pending-sample count — the samples
-        // we just shipped are now durably acknowledged.
+        // Advance succeeded — NOW it's safe to tick the deferred
+        // counters and clear the pending-sample tracker.
+        if (outcome.success()) {
+            metrics.samplesWritten(outcome.samplesWritten());
+        } else {
+            metrics.samplesDropped4xx(outcome.samplesDropped4xx());
+            metrics.walBatchesDropped4xx(1);
+        }
         samplesDrainedSinceLastCheckpoint = 0;
 
         // Best-effort: reader-floor and GC. Failures here only delay GC
