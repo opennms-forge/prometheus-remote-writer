@@ -51,6 +51,11 @@ public final class WalRecovery {
     public static RecoveredWal recover(Path dir, FsyncPolicy fsync, int maxPayload)
             throws IOException {
         ensureDirectoryWritable(dir);
+        // Sweep stale .tmp files left behind by a crash mid-rename.
+        // Typical offender is checkpoint.json.tmp (see Checkpoint.advance).
+        // Left unchecked, they linger forever and can complicate
+        // operator triage.
+        sweepStaleTempFiles(dir);
         Checkpoint checkpoint = Checkpoint.loadOrCreate(dir);
 
         List<Long> starts = listSegmentStartOffsets(dir);
@@ -124,6 +129,14 @@ public final class WalRecovery {
                 e.addSuppressed(suppressed);
             }
             throw e;
+        }
+    }
+
+    private static void sweepStaleTempFiles(Path dir) throws IOException {
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(dir, "*.tmp")) {
+            for (Path p : stream) {
+                Files.deleteIfExists(p);
+            }
         }
     }
 

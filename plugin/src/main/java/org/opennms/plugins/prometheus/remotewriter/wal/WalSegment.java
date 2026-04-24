@@ -152,6 +152,16 @@ public final class WalSegment implements Closeable {
      */
     public long append(byte[] payload) throws IOException {
         ensureOpen();
+        // Reject payloads that Frame.decode would later reject as
+        // "torn" on readback — writing them would create unreadable
+        // bytes that recovery treats as a torn tail, potentially
+        // losing subsequent good frames too. Encode/decode asymmetry
+        // guard.
+        if (payload.length > maxPayload) {
+            throw new IOException(
+                "payload size (" + payload.length + ") exceeds this segment's "
+                + "maxPayload (" + maxPayload + ") — frame would be unreadable");
+        }
         // Defensive: always write at EOF. Nothing in the current code
         // path repositions the active segment's channel before append,
         // but seek-before-write is the safe invariant to guarantee

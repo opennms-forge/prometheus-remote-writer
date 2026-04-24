@@ -249,6 +249,42 @@ class WalHardeningTest {
         }
     }
 
+    // --- Hygiene: maxPayload encode/decode symmetry -------------------------
+
+    @Test
+    void append_rejects_payload_larger_than_maxPayload(@TempDir Path dir) throws IOException {
+        int smallMaxPayload = 64;
+        try (WalSegment seg = WalSegment.create(dir, 0, FsyncPolicy.BATCH, smallMaxPayload)) {
+            assertThatThrownBy(() -> seg.append(new byte[smallMaxPayload + 1]))
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("maxPayload");
+        }
+    }
+
+    @Test
+    void append_accepts_payload_exactly_at_maxPayload(@TempDir Path dir) throws IOException {
+        int smallMaxPayload = 64;
+        try (WalSegment seg = WalSegment.create(dir, 0, FsyncPolicy.BATCH, smallMaxPayload)) {
+            seg.append(new byte[smallMaxPayload]);
+        }
+    }
+
+    // --- Hygiene: .tmp file sweep on recovery -------------------------------
+
+    @Test
+    void recovery_sweeps_stale_tmp_files(@TempDir Path dir) throws IOException {
+        // Simulate a crashed mid-rename: leave a stale checkpoint.json.tmp
+        // plus a misc .tmp in the WAL dir.
+        Files.writeString(dir.resolve("checkpoint.json.tmp"), "{leftover}");
+        Files.writeString(dir.resolve("other.tmp"), "x");
+
+        WalRecovery.RecoveredWal r = WalRecovery.recover(dir, FsyncPolicy.BATCH, MAX_PAYLOAD);
+        r.activeSegment().close();
+
+        assertThat(Files.exists(dir.resolve("checkpoint.json.tmp"))).isFalse();
+        assertThat(Files.exists(dir.resolve("other.tmp"))).isFalse();
+    }
+
     // --- Helpers ------------------------------------------------------------
 
     private static long firstSegmentStart(Path dir) throws IOException {
