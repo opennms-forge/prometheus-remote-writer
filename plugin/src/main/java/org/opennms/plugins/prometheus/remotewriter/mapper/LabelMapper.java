@@ -104,6 +104,7 @@ public final class LabelMapper {
     private final Map<String, List<String>> copyMap;
     private final String metricPrefix;
     private final String instanceId;
+    private final String jobName;
     private final MetadataProcessor metadataProcessor;
     /** One-shot WARN gate for unknown labels.copy sources. Entry is added the
      *  first time a source is observed missing (or empty-valued) at copy
@@ -129,6 +130,7 @@ public final class LabelMapper {
         this.copyMap           = config.labelsCopyMap();
         this.metricPrefix      = config.getMetricPrefix();
         this.instanceId        = config.getInstanceId();
+        this.jobName           = config.getJobName();
         this.metadataProcessor = new MetadataProcessor(config);
     }
 
@@ -168,7 +170,7 @@ public final class LabelMapper {
             metricName = metricPrefix + metricName;
         }
 
-        Defaults defaults = buildDefaults(metricName, sourceTags, instanceId);
+        Defaults defaults = buildDefaults(metricName, sourceTags, instanceId, jobName);
         // Work on a fresh mutable copy; apply{Exclude,Include} may pass the
         // map through unchanged when globs are empty, and metadataProcessor
         // then mutates it — we do not want those mutations to leak back into
@@ -199,7 +201,7 @@ public final class LabelMapper {
      */
     record Defaults(Map<String, String> labels, Set<String> consumedSourceKeys) {}
 
-    static Defaults buildDefaults(String metricName, Map<String, String> tags, String instanceId) {
+    static Defaults buildDefaults(String metricName, Map<String, String> tags, String instanceId, String jobName) {
         Map<String, String> out = new LinkedHashMap<>();
         Set<String> consumed = new HashSet<>();
 
@@ -227,25 +229,44 @@ public final class LabelMapper {
             }
         }
 
-        // node identity — FS-qualified preferred, then parsed nodeId, then numeric dbId.
-        // A half-populated pair (one side empty or blank) falls through rather
-        // than emitting "fs:" or ":fid" with a dangling colon. All three source
-        // keys are marked consumed even on fall-through so `labels.include = *`
-        // never re-surfaces them under a snake-cased alias.
+        // job — collector-type classifier. Emitted unconditionally so
+        // `{job=~".+"}` covers every plugin-emitted sample. When job.name is
+        // set, it overrides the per-sample derivation with a fleet-wide
+        // constant (useful when an operator wants all samples from one plugin
+        // instance under the same job value).
+        String job = (jobName != null && !jobName.isEmpty())
+                ? jobName
+                : deriveJob(resourceId, parsed);
+        out.put("job", Sanitizer.labelValue(job));
+
+        // node + instance identity — FS-qualified preferred, then parsed
+        // nodeId, then numeric dbId. Both labels carry the SAME value; this is
+        // the deliberate "instance = subject" stance (see design notes on
+        // add-default-job-and-instance-labels for rationale). A half-populated
+        // FS pair (one side empty or blank) falls through rather than emitting
+        // "fs:" or ":fid" with a dangling colon. All three source keys are
+        // marked consumed even on fall-through so `labels.include = *` never
+        // re-surfaces them under a snake-cased alias.
         consumed.add("foreignSource");
         consumed.add("foreignId");
         consumed.add("nodeId");
+        String nodeValue = null;
         String fs  = tags.get("foreignSource");
         String fid = tags.get("foreignId");
         if (fs != null && !fs.isEmpty() && fid != null && !fid.isEmpty()) {
-            out.put("node", Sanitizer.labelValue(fs + ":" + fid));
+            nodeValue = fs + ":" + fid;
         } else if (parsed != null) {
-            out.put("node", Sanitizer.labelValue(parsed.nodeId()));
+            nodeValue = parsed.nodeId();
         } else {
             String nodeId = tags.get("nodeId");
             if (nodeId != null && !nodeId.isEmpty()) {
-                out.put("node", Sanitizer.labelValue(nodeId));
+                nodeValue = nodeId;
             }
+        }
+        if (nodeValue != null) {
+            String sanitized = Sanitizer.labelValue(nodeValue);
+            out.put("node",     sanitized);
+            out.put("instance", sanitized);
         }
 
         consumed.add("nodeLabel");
@@ -291,6 +312,42 @@ public final class LabelMapper {
         if (v != null && !v.isEmpty()) {
             out.put(labelName, Sanitizer.labelValue(v));
         }
+    }
+
+    /**
+     * Derive the {@code job} label from the sample's {@code resourceId} shape.
+     * Mapping (in evaluation order):
+     *
+     * <ul>
+     *   <li>{@code resourceId} starts with {@code "snmp/fs/"} AND the parsed
+     *       {@code <group>} segment equals {@code "opennms-jvm"} or starts
+     *       with {@code "jmx-"} → {@code "jmx"} (OpenNMS JMX collector
+     *       hierarchy: self-monitor, JMX Minion, etc.)</li>
+     *   <li>Any other parseable shape (bracketed, slash-DB, other slash-FS
+     *       groups) → {@code "snmp"} (the overwhelmingly common case for
+     *       OpenNMS data collection)</li>
+     *   <li>{@code resourceId} null or unparseable → {@code "opennms"}
+     *       (catch-all so dashboards querying {@code {job=~".+"}} cover
+     *       every plugin-emitted sample, and operators seeing
+     *       {@code job="opennms"} have a visible cue that the parser didn't
+     *       recognize the shape)</li>
+     * </ul>
+     *
+     * <p>Overridden by a non-empty {@code job.name} configuration value at
+     * the call site — this method is only consulted when the operator hasn't
+     * set the override.
+     */
+    static String deriveJob(String resourceId, ResourceIdParser.Parsed parsed) {
+        if (parsed == null || resourceId == null) {
+            return "opennms";
+        }
+        if (resourceId.startsWith("snmp/fs/")) {
+            String group = parsed.resourceType();
+            if ("opennms-jvm".equals(group) || group.startsWith("jmx-")) {
+                return "jmx";
+            }
+        }
+        return "snmp";
     }
 
     // -- exclude/include/rename ----------------------------------------------

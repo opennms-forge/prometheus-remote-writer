@@ -451,18 +451,24 @@ class LabelMapperTest {
 
     @Test
     void copy_does_not_resurrect_excluded_label() {
-        // `exclude = node, copy = node -> instance`: node is gone before copy
-        // runs, so `instance` is not created either. The scenario in the
-        // delta spec also requires exactly one startup WARN naming `node` as
-        // an unknown copy source; assert it via the test-visible gate.
+        // `exclude = foreign_source, copy = foreign_source -> my_fs`:
+        // foreign_source is gone before copy runs, so my_fs is not created
+        // either. The scenario in the delta spec requires exactly one startup
+        // WARN naming the excluded label as an unknown copy source.
+        //
+        // NOTE: the original test used `node -> instance` for this, but v0.4
+        // now emits `instance` as a default label (mirror of node), so that
+        // pair no longer demonstrates the "copy can't resurrect excluded"
+        // invariant — `instance` is present regardless of copy. We pick a
+        // different source whose target is not a default emission.
         PrometheusRemoteWriterConfig c = defaultConfig();
-        c.setLabelsExclude("node");
-        c.setLabelsCopy("node -> instance");
+        c.setLabelsExclude("foreign_source");
+        c.setLabelsCopy("foreign_source -> my_fs");
         LabelMapper mapper = new LabelMapper(c);
         MappedSample out = mapper.map(interfaceSample());
-        assertThat(out.labels()).doesNotContainKey("node");
-        assertThat(out.labels()).doesNotContainKey("instance");
-        assertThat(mapper.warnedUnknownCopySourcesForTesting()).containsExactly("node");
+        assertThat(out.labels()).doesNotContainKey("foreign_source");
+        assertThat(out.labels()).doesNotContainKey("my_fs");
+        assertThat(mapper.warnedUnknownCopySourcesForTesting()).containsExactly("foreign_source");
     }
 
     @Test
@@ -579,6 +585,139 @@ class LabelMapperTest {
         assertThat(mapper.warnedUnknownCopySourcesForTesting()).containsExactly("empty_tag");
     }
 
+    // ---------- job label derivation (v0.4) ---------------------------------
+
+    @Test
+    void job_bracketed_resource_id_derives_to_snmp() {
+        MappedSample out = DEFAULT_MAPPER.map(interfaceSample());
+        assertThat(out.labels()).containsEntry("job", "snmp");
+    }
+
+    @Test
+    void job_slash_db_resource_id_derives_to_snmp() {
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "foo")
+                .intrinsicTag("resourceId", "snmp/42/hrStorageIndex/1"));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels()).containsEntry("job", "snmp");
+    }
+
+    @Test
+    void job_slash_fs_jmx_minion_derives_to_jmx() {
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "foo")
+                .intrinsicTag("resourceId", "snmp/fs/selfmonitor/1/jmx-minion/OpenNMS_Name_Notifd"));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels()).containsEntry("job", "jmx");
+    }
+
+    @Test
+    void job_slash_fs_opennms_jvm_derives_to_jmx() {
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "foo")
+                .intrinsicTag("resourceId", "snmp/fs/selfmonitor/1/opennms-jvm/Heap"));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels()).containsEntry("job", "jmx");
+    }
+
+    @Test
+    void job_slash_fs_other_group_derives_to_snmp() {
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "foo")
+                .intrinsicTag("resourceId", "snmp/fs/prod/server-01/hrStorageIndex/1"));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels()).containsEntry("job", "snmp");
+    }
+
+    @Test
+    void job_unparseable_resource_id_derives_to_opennms() {
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "foo")
+                .intrinsicTag("resourceId", "not-a-valid-resource-id"));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels()).containsEntry("job", "opennms");
+    }
+
+    @Test
+    void job_absent_resource_id_derives_to_opennms() {
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "foo")
+                .externalTag("nodeId", "1"));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels()).containsEntry("job", "opennms");
+    }
+
+    @Test
+    void job_name_override_replaces_derivation() {
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setJobName("my-opennms-fleet");
+        MappedSample out = new LabelMapper(c).map(interfaceSample());
+        // Would otherwise derive to "snmp" from the bracketed resourceId.
+        assertThat(out.labels()).containsEntry("job", "my-opennms-fleet");
+    }
+
+    @Test
+    void job_name_override_replaces_opennms_catchall() {
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setJobName("my-fleet");
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "foo")
+                .intrinsicTag("resourceId", "garbage"));
+        MappedSample out = new LabelMapper(c).map(s);
+        // Would otherwise fall back to "opennms"; operator override wins.
+        assertThat(out.labels()).containsEntry("job", "my-fleet");
+    }
+
+    @Test
+    void job_blank_override_uses_derivation() {
+        // setJobName with blank normalises to null; derivation applies.
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setJobName("   ");
+        MappedSample out = new LabelMapper(c).map(interfaceSample());
+        assertThat(out.labels()).containsEntry("job", "snmp");
+    }
+
+    // ---------- instance mirrors node (v0.4) --------------------------------
+
+    @Test
+    void instance_mirrors_node_for_fs_qualified_identity() {
+        MappedSample out = DEFAULT_MAPPER.map(interfaceSample());
+        assertThat(out.labels()).containsEntry("node", "NOC:router-42");
+        assertThat(out.labels()).containsEntry("instance", "NOC:router-42");
+    }
+
+    @Test
+    void instance_mirrors_node_for_parsed_slash_fs_identity() {
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "jvm_memory")
+                .intrinsicTag("resourceId", "snmp/fs/selfmonitor/1/jmx-minion/OpenNMS_Name_Notifd"));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels()).containsEntry("node", "selfmonitor:1");
+        assertThat(out.labels()).containsEntry("instance", "selfmonitor:1");
+    }
+
+    @Test
+    void instance_mirrors_node_for_numeric_db_id_fallback() {
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "foo")
+                .externalTag("nodeId", "7"));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels()).containsEntry("node", "7");
+        assertThat(out.labels()).containsEntry("instance", "7");
+    }
+
+    @Test
+    void instance_absent_when_no_identity_source() {
+        // No FS tags, unparseable resourceId, no nodeId tag — neither `node`
+        // nor `instance` should be emitted.
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "foo")
+                .intrinsicTag("resourceId", "garbage"));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels()).doesNotContainKey("node");
+        assertThat(out.labels()).doesNotContainKey("instance");
+    }
+
     // ---------- node-label precedence (slash-path) --------------------------
 
     @Test
@@ -672,7 +811,7 @@ class LabelMapperTest {
         tags.put("nodeId", "42");
         tags.put("categories", "Routers, ProductionSites");
 
-        LabelMapper.Defaults defaults = LabelMapper.buildDefaults("ifHCInOctets", tags, null);
+        LabelMapper.Defaults defaults = LabelMapper.buildDefaults("ifHCInOctets", tags, null, null);
 
         assertThat(defaults.consumedSourceKeys()).containsExactlyInAnyOrder(
                 IntrinsicTagNames.name,
