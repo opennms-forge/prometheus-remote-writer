@@ -52,6 +52,15 @@ public final class WalWriter implements Closeable {
     private WalSegment active;
     private boolean closed;
 
+    /**
+     * Floor offset below which the DROP_OLDEST path must not evict.
+     * Set by the storage/flusher layer to the reader's current offset,
+     * so eviction never deletes a segment the reader still needs. 0
+     * (the default) means "no floor" — every sealed segment is
+     * evictable — which matches test and standalone-library use cases.
+     */
+    private volatile long readerOffsetFloor;
+
     public WalWriter(Path dir, WalSegment initialActiveSegment, long segmentSizeBytes,
                      long maxSizeBytes, OverflowPolicy overflow,
                      FsyncPolicy fsync, int maxPayload) {
@@ -223,9 +232,26 @@ public final class WalWriter implements Closeable {
     }
 
     /**
+     * Set the reader-offset floor. The {@link OverflowPolicy#DROP_OLDEST}
+     * path will not evict any segment whose {@code endOffset} exceeds
+     * this floor — i.e., segments that still contain unread data from
+     * the reader's perspective. Callable from any thread; reads and
+     * writes are volatile.
+     *
+     * <p>In the standalone library (no reader), the default floor of 0
+     * lets eviction proceed unrestricted — matching the behavior the
+     * unit tests were written against.
+     */
+    public void setReaderOffsetFloor(long floor) {
+        this.readerOffsetFloor = floor;
+    }
+
+    /**
      * Evict the oldest sealed segment; return {@code {bytesFreed,
-     * sampleCountFromIdx}} or {@code null} if there was nothing to evict
-     * (only the active segment exists).
+     * sampleCountFromIdx}} or {@code null} if there is nothing to evict
+     * (only the active segment exists, or the oldest segment still
+     * contains data the reader has not drained — see
+     * {@link #setReaderOffsetFloor(long)}).
      */
     private long[] evictOldestSegment() throws IOException {
         List<Long> starts = listSegmentStartOffsets();
@@ -239,6 +265,19 @@ public final class WalWriter implements Closeable {
         Path seg = WalSegment.segPathFor(dir, oldest);
         Path idx = WalSegment.idxPathFor(dir, oldest);
         long bytes = Files.exists(seg) ? Files.size(seg) : 0L;
+        long endOffset = oldest + bytes;
+
+        // Protect the reader: if this segment still contains any bytes
+        // the reader has not drained past, refuse to evict. The caller
+        // (append's overflow loop) will see null and surface
+        // WalFullException — correct: the WAL really is full from the
+        // reader's point of view, and overwriting would corrupt its
+        // state.
+        long floor = readerOffsetFloor;
+        if (floor > 0 && endOffset > floor) {
+            return null;
+        }
+
         // Read sample count from .idx without opening the .seg.
         long samples = 0L;
         if (Files.exists(idx)) {
@@ -246,6 +285,7 @@ public final class WalWriter implements Closeable {
         }
         Files.deleteIfExists(seg);
         Files.deleteIfExists(idx);
+        FsUtils.fsyncDirectory(dir);
         return new long[]{bytes, samples};
     }
 
