@@ -67,54 +67,64 @@ public final class WalRecovery {
         Path newestPath = WalSegment.segPathFor(dir, newestStart);
         WalSegment activeSegment = WalSegment.openForAppend(newestPath, newestStart,
                 fsync, maxPayload, 0);
-        activeSegment.recover();
-        // Persist the updated .idx (recovery may have flipped status to
-        // TORN or updated sample_count).
-        activeSegment.writeIndex();
+        // Any error between here and the return must close activeSegment
+        // so a failed startup recovery does not leak file descriptors.
+        try {
+            activeSegment.recover();
+            // Persist the updated .idx (recovery may have flipped status to
+            // TORN or updated sample_count).
+            activeSegment.writeIndex();
 
-        // Pending-sample count: sum of sample_count across every segment
-        // whose endOffset is past the checkpoint offset. Approximate for
-        // segments that span the checkpoint (over-counts the shipped
-        // prefix) but good enough for the startup INFO line and the
-        // wal_replay_samples_total gauge — Flusher will precisely
-        // account for what actually flushes.
-        long pending = 0;
-        long totalBytes = 0;
-        long checkpointOffset = checkpoint.lastSentOffset();
-        for (long start : starts) {
-            Path segPath = WalSegment.segPathFor(dir, start);
-            long size = Files.size(segPath);
-            totalBytes += size;
-            long endOffset = start + size;
-            if (endOffset > checkpointOffset) {
-                Path idxPath = WalSegment.idxPathFor(dir, start);
-                int samples;
-                if (start == newestStart) {
-                    // Use the live recovery count — .idx may be stale if
-                    // recovery just truncated.
-                    samples = activeSegment.sampleCount();
-                } else if (Files.exists(idxPath)) {
-                    samples = extractSampleCount(Files.readString(idxPath));
-                } else {
-                    samples = 0;
+            // Pending-sample count: sum of sample_count across every segment
+            // whose endOffset is past the checkpoint offset. Approximate for
+            // segments that span the checkpoint (over-counts the shipped
+            // prefix) but good enough for the startup INFO line and the
+            // wal_replay_samples_total gauge — Flusher will precisely
+            // account for what actually flushes.
+            long pending = 0;
+            long totalBytes = 0;
+            long checkpointOffset = checkpoint.lastSentOffset();
+            for (long start : starts) {
+                Path segPath = WalSegment.segPathFor(dir, start);
+                long size = Files.size(segPath);
+                totalBytes += size;
+                long endOffset = start + size;
+                if (endOffset > checkpointOffset) {
+                    Path idxPath = WalSegment.idxPathFor(dir, start);
+                    int samples;
+                    if (start == newestStart) {
+                        // Use the live recovery count — .idx may be stale if
+                        // recovery just truncated.
+                        samples = activeSegment.sampleCount();
+                    } else if (Files.exists(idxPath)) {
+                        samples = extractSampleCount(Files.readString(idxPath));
+                    } else {
+                        samples = 0;
+                    }
+                    pending += samples;
                 }
-                pending += samples;
             }
-        }
 
-        // Sanity: checkpoint must not be past the newest segment's end.
-        // If it is, the WAL is inconsistent (likely a misconfigured
-        // restore). Fail loud rather than silently reset.
-        long newestEnd = newestStart + Files.size(newestPath);
-        if (checkpointOffset > newestEnd) {
-            activeSegment.close();
-            throw new IOException(
-                "checkpoint.last_sent_offset (" + checkpointOffset + ") is past "
-                + "the newest segment's end (" + newestEnd + "). The WAL "
-                + "directory is inconsistent — remove it to reset.");
-        }
+            // Sanity: checkpoint must not be past the newest segment's end.
+            // If it is, the WAL is inconsistent (likely a misconfigured
+            // restore). Fail loud rather than silently reset.
+            long newestEnd = newestStart + Files.size(newestPath);
+            if (checkpointOffset > newestEnd) {
+                throw new IOException(
+                    "checkpoint.last_sent_offset (" + checkpointOffset + ") is past "
+                    + "the newest segment's end (" + newestEnd + "). The WAL "
+                    + "directory is inconsistent — remove it to reset.");
+            }
 
-        return new RecoveredWal(activeSegment, checkpoint, pending, totalBytes);
+            return new RecoveredWal(activeSegment, checkpoint, pending, totalBytes);
+        } catch (IOException | RuntimeException e) {
+            try {
+                activeSegment.close();
+            } catch (IOException suppressed) {
+                e.addSuppressed(suppressed);
+            }
+            throw e;
+        }
     }
 
     private static void ensureDirectoryWritable(Path dir) throws IOException {

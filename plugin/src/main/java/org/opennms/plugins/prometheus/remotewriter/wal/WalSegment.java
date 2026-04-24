@@ -104,6 +104,10 @@ public final class WalSegment implements Closeable {
         WalSegment seg = new WalSegment(segPath, idxPath, startOffset, ch, fsync, maxPayload,
                 Instant.now(), 0, Status.OPEN);
         seg.writeIndex();
+        // Fsync the directory so the new .seg dirent is durable. Without
+        // this, a crash right after rotation can lose the "this segment
+        // exists" signal even though the file's bytes are on disk.
+        FsUtils.fsyncDirectory(dir);
         return seg;
     }
 
@@ -148,6 +152,12 @@ public final class WalSegment implements Closeable {
      */
     public long append(byte[] payload) throws IOException {
         ensureOpen();
+        // Defensive: always write at EOF. Nothing in the current code
+        // path repositions the active segment's channel before append,
+        // but seek-before-write is the safe invariant to guarantee
+        // append semantics regardless of what a future caller does.
+        // Cheap (a noop when position already equals size on most JVMs).
+        channel.position(channel.size());
         ByteBuffer frame = Frame.encode(payload);
         while (frame.hasRemaining()) channel.write(frame);
         if (fsync == FsyncPolicy.ALWAYS) channel.force(false);

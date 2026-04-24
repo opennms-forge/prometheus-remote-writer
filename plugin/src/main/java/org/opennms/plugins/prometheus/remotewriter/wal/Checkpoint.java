@@ -105,6 +105,10 @@ public final class Checkpoint {
             ch.force(true);
         }
         Files.move(tmp, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        // Fsync the parent directory so the rename's new dirent is
+        // durable — without this, a crash after the rename can lose the
+        // new name on ext4/XFS, leaving the old (or no) checkpoint.
+        FsUtils.fsyncDirectory(file.getParent());
         lastSentOffset = newOffset;
         lastSentAt = now;
     }
@@ -142,6 +146,11 @@ public final class Checkpoint {
                 Files.deleteIfExists(segPath);
                 Files.deleteIfExists(idxPath);
             }
+        }
+        if (bytesReclaimed > 0) {
+            // Make the deletions durable — otherwise a crash can resurrect
+            // the "deleted" segment on next mount.
+            FsUtils.fsyncDirectory(dir);
         }
         return bytesReclaimed;
     }
