@@ -7,6 +7,31 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`samples_unparseable_resource_id_total` counter** — increments once per
+  sample whose `resourceId` tag failed all parser grammars (bracketed,
+  slash-FS, slash-DB) or was absent. Surfaced via
+  `opennms:prometheus-writer-stats` alongside the existing `samples_*_total`
+  counters. Lets operators see the v0.4 "catch-all `job=opennms`" bucket
+  size without grepping logs — a non-zero rate signals config drift, a new
+  resourceId shape, or unexpected upstream input.
+
+### Tests
+
+- **Blueprint-wiring regression test** — reflectively cross-checks every
+  `<property name="X">` in `OSGI-INF/blueprint/blueprint.xml` against the
+  corresponding `set*` method on `PrometheusRemoteWriterConfig`, and
+  both-directions against every `<cm:property>` default. Catches the
+  v0.3-style silent-no-op where `labels.copy` had a Java setter but no
+  Blueprint binding — the kind of bug no existing test would see.
+- **IT storage-rebuild isolation** — five `PrometheusRemoteWriteIT` tests
+  that recreate `PrometheusRemoteWriterStorage` with a custom config now
+  use a local `override` variable with try/finally stop. Earlier pattern
+  (field reassignment between stop/start) would leak a started storage on
+  an assertion failure and leak a stopped reference on a constructor or
+  `start()` throw.
+
 ## [0.4.0] — TBD
 
 ### Added
