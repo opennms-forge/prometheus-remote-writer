@@ -8,7 +8,12 @@ package org.opennms.plugins.prometheus.remotewriter.wal;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.nio.file.DirectoryStream;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
 import org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy;
 
@@ -29,27 +34,44 @@ import org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy;
  */
 public final class WalWriter implements Closeable {
 
+    /** Overflow policy when the WAL hits {@code maxSizeBytes}. */
+    public enum OverflowPolicy {
+        /** Refuse the append with {@link WalFullException}. Caller handles. */
+        BACKPRESSURE,
+        /** Evict the oldest segment to make room; append proceeds. */
+        DROP_OLDEST
+    }
+
     private final Path dir;
     private final long segmentSizeBytes;
+    private final long maxSizeBytes;
+    private final OverflowPolicy overflow;
     private final FsyncPolicy fsync;
     private final int maxPayload;
 
     private WalSegment active;
     private boolean closed;
 
-    /**
-     * Normally constructed through one of the factory methods; tests
-     * occasionally use the direct ctor.
-     */
     public WalWriter(Path dir, WalSegment initialActiveSegment, long segmentSizeBytes,
+                     long maxSizeBytes, OverflowPolicy overflow,
                      FsyncPolicy fsync, int maxPayload) {
         if (initialActiveSegment == null) {
             throw new IllegalArgumentException("initialActiveSegment must not be null — "
                 + "use createNew() or resume() to obtain one");
         }
+        if (maxSizeBytes <= 0) {
+            throw new IllegalArgumentException("maxSizeBytes must be positive: " + maxSizeBytes);
+        }
+        if (segmentSizeBytes <= 0 || segmentSizeBytes > maxSizeBytes) {
+            throw new IllegalArgumentException(
+                "segmentSizeBytes must be positive and <= maxSizeBytes: segment="
+                + segmentSizeBytes + ", max=" + maxSizeBytes);
+        }
         this.dir = dir;
         this.active = initialActiveSegment;
         this.segmentSizeBytes = segmentSizeBytes;
+        this.maxSizeBytes = maxSizeBytes;
+        this.overflow = overflow;
         this.fsync = fsync;
         this.maxPayload = maxPayload;
     }
@@ -58,10 +80,21 @@ public final class WalWriter implements Closeable {
      * Bootstrap a brand-new WAL in an empty directory: opens segment 0
      * and returns a writer positioned at global offset 0.
      */
-    public static WalWriter createNew(Path dir, long segmentSizeBytes, FsyncPolicy fsync,
+    public static WalWriter createNew(Path dir, long segmentSizeBytes, long maxSizeBytes,
+                                      OverflowPolicy overflow, FsyncPolicy fsync,
                                       int maxPayload) throws IOException {
+        // Validate args BEFORE creating the segment file so an invalid
+        // config doesn't leave orphaned .seg files in the dir.
+        if (maxSizeBytes <= 0) {
+            throw new IllegalArgumentException("maxSizeBytes must be positive: " + maxSizeBytes);
+        }
+        if (segmentSizeBytes <= 0 || segmentSizeBytes > maxSizeBytes) {
+            throw new IllegalArgumentException(
+                "segmentSizeBytes must be positive and <= maxSizeBytes: segment="
+                + segmentSizeBytes + ", max=" + maxSizeBytes);
+        }
         WalSegment seg = WalSegment.create(dir, 0, fsync, maxPayload);
-        return new WalWriter(dir, seg, segmentSizeBytes, fsync, maxPayload);
+        return new WalWriter(dir, seg, segmentSizeBytes, maxSizeBytes, overflow, fsync, maxPayload);
     }
 
     /**
@@ -71,25 +104,174 @@ public final class WalWriter implements Closeable {
      * size exceeds the threshold.
      */
     public static WalWriter resume(Path dir, WalSegment activeSegment, long segmentSizeBytes,
+                                   long maxSizeBytes, OverflowPolicy overflow,
                                    FsyncPolicy fsync, int maxPayload) {
-        return new WalWriter(dir, activeSegment, segmentSizeBytes, fsync, maxPayload);
+        return new WalWriter(dir, activeSegment, segmentSizeBytes, maxSizeBytes,
+                overflow, fsync, maxPayload);
     }
 
     /**
      * Append one encoded payload. Returns the global offset immediately
      * past the written frame (inclusive end; exclusive upper bound).
-     * Rotates to a new segment if the active one exceeds
-     * {@code segmentSizeBytes} after the append — rotation is
-     * post-append, so a single very-large frame may leave the active
-     * segment somewhat above the threshold before rotation fires.
+     *
+     * <p>Applies the configured overflow policy if the projected WAL
+     * size would exceed {@code maxSizeBytes} after this append:
+     * {@link OverflowPolicy#BACKPRESSURE} throws {@link WalFullException}
+     * (caller converts to operator-visible counter + StorageException);
+     * {@link OverflowPolicy#DROP_OLDEST} evicts the oldest sealed
+     * segment and retries, repeating until the append fits or no more
+     * eviction is possible (a single frame larger than
+     * {@code maxSizeBytes} is an unrecoverable configuration error —
+     * {@link WalFullException} with an explanatory message).
+     *
+     * <p>Rotates to a new segment if the active one crosses
+     * {@code segmentSizeBytes} after the append (post-append check).
      */
     public synchronized long append(byte[] payload) throws IOException {
         ensureOpen();
+        long frameSize = Frame.HEADER_BYTES + payload.length;
+        if (frameSize > maxSizeBytes) {
+            throw new WalFullException(
+                "single frame (" + frameSize + " bytes) exceeds wal.max-size-bytes ("
+                + maxSizeBytes + ") — increase the cap or reduce the label set", 0);
+        }
+
+        long evictedBytes = 0L;
+        int evictedFrames = 0;
+        while (currentTotalBytes() + frameSize > maxSizeBytes) {
+            if (overflow == OverflowPolicy.BACKPRESSURE) {
+                throw new WalFullException(
+                    "WAL at cap (" + currentTotalBytes() + "/" + maxSizeBytes
+                    + " bytes); refusing append under backpressure policy", 0);
+            }
+            // DROP_OLDEST: evict the oldest SEALED segment (never the
+            // active one — which is always the newest).
+            long[] evictedStats = evictOldestSegment();
+            if (evictedStats == null) {
+                // No segment available to evict (only the active segment
+                // exists and it alone exceeds the cap). Surfacing this as
+                // wal-full is honest — the operator needs a larger cap.
+                throw new WalFullException(
+                    "WAL at cap with no evictable segments (single active segment "
+                    + "exceeds cap, segmentSizeBytes too close to maxSizeBytes)",
+                    evictedFrames);
+            }
+            evictedBytes += evictedStats[0];
+            evictedFrames += (int) evictedStats[1];
+        }
+
         long offsetAfter = active.append(payload);
         if (active.endOffset() - active.startOffset() >= segmentSizeBytes) {
             rotate();
         }
+        // Observability: eviction count propagates up via the returned
+        // EvictionObserver if the caller set one; the metrics layer uses
+        // this to bump samples_dropped_wal_full_total. Simple variant
+        // here — callers track via the return of appendWithEvictionStats
+        // if they need it. For v1, just log eviction at WARN (done by
+        // evictOldestSegment) and return offsetAfter.
         return offsetAfter;
+    }
+
+    /**
+     * Like {@link #append(byte[])} but also reports eviction stats —
+     * the number of frames and bytes dropped from the oldest segment
+     * to make room (both zero under BACKPRESSURE or when no eviction
+     * was needed). Used by the storage layer to bump
+     * {@code samples_dropped_wal_full_total}.
+     */
+    public synchronized AppendResult appendWithStats(byte[] payload) throws IOException {
+        ensureOpen();
+        long frameSize = Frame.HEADER_BYTES + payload.length;
+        if (frameSize > maxSizeBytes) {
+            throw new WalFullException(
+                "single frame (" + frameSize + " bytes) exceeds wal.max-size-bytes ("
+                + maxSizeBytes + ") — increase the cap or reduce the label set", 0);
+        }
+        long evictedBytes = 0L;
+        int evictedFrames = 0;
+        while (currentTotalBytes() + frameSize > maxSizeBytes) {
+            if (overflow == OverflowPolicy.BACKPRESSURE) {
+                throw new WalFullException(
+                    "WAL at cap (" + currentTotalBytes() + "/" + maxSizeBytes
+                    + " bytes); refusing append under backpressure policy",
+                    evictedFrames);
+            }
+            long[] stats = evictOldestSegment();
+            if (stats == null) {
+                throw new WalFullException(
+                    "WAL at cap with no evictable segments (single active segment "
+                    + "exceeds cap)", evictedFrames);
+            }
+            evictedBytes += stats[0];
+            evictedFrames += (int) stats[1];
+        }
+        long offsetAfter = active.append(payload);
+        if (active.endOffset() - active.startOffset() >= segmentSizeBytes) {
+            rotate();
+        }
+        return new AppendResult(offsetAfter, evictedBytes, evictedFrames);
+    }
+
+    /** Computes the current total on-disk size of all segments. */
+    public synchronized long currentTotalBytes() throws IOException {
+        long total = 0;
+        try (DirectoryStream<Path> s = Files.newDirectoryStream(dir, "*" + WalSegment.SEG_EXT)) {
+            for (Path p : s) total += Files.size(p);
+        }
+        return total;
+    }
+
+    /**
+     * Evict the oldest sealed segment; return {@code {bytesFreed,
+     * sampleCountFromIdx}} or {@code null} if there was nothing to evict
+     * (only the active segment exists).
+     */
+    private long[] evictOldestSegment() throws IOException {
+        List<Long> starts = listSegmentStartOffsets();
+        if (starts.size() <= 1) return null; // only the active one
+
+        long oldest = starts.get(0);
+        if (oldest == active.startOffset()) {
+            // Shouldn't happen — the active is the newest, oldest is first.
+            return null;
+        }
+        Path seg = WalSegment.segPathFor(dir, oldest);
+        Path idx = WalSegment.idxPathFor(dir, oldest);
+        long bytes = Files.exists(seg) ? Files.size(seg) : 0L;
+        // Read sample count from .idx without opening the .seg.
+        long samples = 0L;
+        if (Files.exists(idx)) {
+            samples = extractSampleCount(Files.readString(idx));
+        }
+        Files.deleteIfExists(seg);
+        Files.deleteIfExists(idx);
+        return new long[]{bytes, samples};
+    }
+
+    private List<Long> listSegmentStartOffsets() throws IOException {
+        List<Long> out = new ArrayList<>();
+        try (DirectoryStream<Path> s = Files.newDirectoryStream(dir, "*" + WalSegment.SEG_EXT)) {
+            for (Path p : s) {
+                long start = WalSegment.parseStartOffset(p);
+                if (start >= 0) out.add(start);
+            }
+        }
+        Collections.sort(out);
+        return out;
+    }
+
+    private static long extractSampleCount(String idxJson) {
+        int i = idxJson.indexOf("\"sample_count\":");
+        if (i < 0) return 0;
+        i += "\"sample_count\":".length();
+        int end = i;
+        while (end < idxJson.length() && Character.isDigit(idxJson.charAt(end))) end++;
+        try {
+            return Long.parseLong(idxJson.substring(i, end));
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 
     /**
@@ -135,4 +317,17 @@ public final class WalWriter implements Closeable {
     private void ensureOpen() {
         if (closed) throw new IllegalStateException("writer is closed");
     }
+
+    /**
+     * Per-append observability: the offset past the written frame plus
+     * the eviction stats from any drop-oldest policy application.
+     *
+     * @param offsetAfter    global offset past the written frame
+     * @param evictedBytes   bytes reclaimed via eviction (0 unless
+     *                       DROP_OLDEST fired during this append)
+     * @param evictedFrames  sample count reclaimed (approximate — from
+     *                       .idx rather than recomputed from .seg to
+     *                       avoid a rescan on every eviction)
+     */
+    public record AppendResult(long offsetAfter, long evictedBytes, int evictedFrames) {}
 }

@@ -17,6 +17,7 @@ import java.time.Instant;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy;
+import org.opennms.plugins.prometheus.remotewriter.wal.WalWriter.OverflowPolicy;
 
 class CheckpointTest {
 
@@ -96,7 +97,7 @@ class CheckpointTest {
             throws IOException {
         // Build a WAL with 3 segments via rotation.
         long segmentSize = 200;
-        try (WalWriter w = WalWriter.createNew(dir, segmentSize, FsyncPolicy.BATCH, MAX_PAYLOAD)) {
+        try (WalWriter w = WalWriter.createNew(dir, segmentSize, 1L << 30, OverflowPolicy.BACKPRESSURE, FsyncPolicy.BATCH, MAX_PAYLOAD)) {
             // 2 frames per segment → 3 segments after 6 appends.
             for (int i = 0; i < 6; i++) w.append(new byte[100]);
             w.flush();
@@ -123,7 +124,7 @@ class CheckpointTest {
     @Test
     void gc_never_deletes_the_newest_segment(@TempDir Path dir) throws IOException {
         long segmentSize = 200;
-        try (WalWriter w = WalWriter.createNew(dir, segmentSize, FsyncPolicy.BATCH, MAX_PAYLOAD)) {
+        try (WalWriter w = WalWriter.createNew(dir, segmentSize, 1L << 30, OverflowPolicy.BACKPRESSURE, FsyncPolicy.BATCH, MAX_PAYLOAD)) {
             for (int i = 0; i < 6; i++) w.append(new byte[100]);
             w.flush();
         }
@@ -138,7 +139,7 @@ class CheckpointTest {
 
     @Test
     void gc_on_single_segment_directory_is_noop(@TempDir Path dir) throws IOException {
-        try (WalWriter w = WalWriter.createNew(dir, 1 << 20, FsyncPolicy.BATCH, MAX_PAYLOAD)) {
+        try (WalWriter w = WalWriter.createNew(dir, 1 << 20, 1L << 30, OverflowPolicy.BACKPRESSURE, FsyncPolicy.BATCH, MAX_PAYLOAD)) {
             w.append(new byte[100]);
             w.flush();
         }
@@ -157,7 +158,7 @@ class CheckpointTest {
         // and it's eligible for deletion. This test pins the boundary
         // semantic.
         long segmentSize = 200;
-        try (WalWriter w = WalWriter.createNew(dir, segmentSize, FsyncPolicy.BATCH, MAX_PAYLOAD)) {
+        try (WalWriter w = WalWriter.createNew(dir, segmentSize, 1L << 30, OverflowPolicy.BACKPRESSURE, FsyncPolicy.BATCH, MAX_PAYLOAD)) {
             for (int i = 0; i < 4; i++) w.append(new byte[100]);
             w.flush();
         }

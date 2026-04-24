@@ -20,6 +20,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.opennms.plugins.prometheus.remotewriter.wal.WalReader.ReadResult;
 import org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy;
+import org.opennms.plugins.prometheus.remotewriter.wal.WalWriter.OverflowPolicy;
 
 class WalWriterReaderTest {
 
@@ -27,7 +28,7 @@ class WalWriterReaderTest {
 
     @Test
     void writer_appends_and_reader_drains_in_order(@TempDir Path dir) throws IOException {
-        try (WalWriter w = WalWriter.createNew(dir, 1 << 20, FsyncPolicy.BATCH, MAX_PAYLOAD)) {
+        try (WalWriter w = WalWriter.createNew(dir, 1 << 20, 1L << 30, OverflowPolicy.BACKPRESSURE, FsyncPolicy.BATCH, MAX_PAYLOAD)) {
             w.append("one".getBytes());
             w.append("two".getBytes());
             w.append("three".getBytes());
@@ -42,7 +43,7 @@ class WalWriterReaderTest {
 
     @Test
     void reader_respects_max_samples_bound(@TempDir Path dir) throws IOException {
-        try (WalWriter w = WalWriter.createNew(dir, 1 << 20, FsyncPolicy.BATCH, MAX_PAYLOAD)) {
+        try (WalWriter w = WalWriter.createNew(dir, 1 << 20, 1L << 30, OverflowPolicy.BACKPRESSURE, FsyncPolicy.BATCH, MAX_PAYLOAD)) {
             for (int i = 0; i < 10; i++) w.append(("sample-" + i).getBytes());
             w.flush();
         }
@@ -74,7 +75,7 @@ class WalWriterReaderTest {
         // Threshold = 250 bytes → rotation after the 3rd append.
         long segmentSize = 250;
         byte[] payload = new byte[100];
-        try (WalWriter w = WalWriter.createNew(dir, segmentSize, FsyncPolicy.BATCH, MAX_PAYLOAD)) {
+        try (WalWriter w = WalWriter.createNew(dir, segmentSize, 1L << 30, OverflowPolicy.BACKPRESSURE, FsyncPolicy.BATCH, MAX_PAYLOAD)) {
             for (int i = 0; i < 10; i++) w.append(payload);
             w.flush();
         }
@@ -92,7 +93,7 @@ class WalWriterReaderTest {
         long segmentSize = 250;
         byte[] p = new byte[100];
         List<String> labels = new ArrayList<>();
-        try (WalWriter w = WalWriter.createNew(dir, segmentSize, FsyncPolicy.BATCH, MAX_PAYLOAD)) {
+        try (WalWriter w = WalWriter.createNew(dir, segmentSize, 1L << 30, OverflowPolicy.BACKPRESSURE, FsyncPolicy.BATCH, MAX_PAYLOAD)) {
             for (int i = 0; i < 15; i++) {
                 String marker = "m-" + i;
                 labels.add(marker);
@@ -123,7 +124,7 @@ class WalWriterReaderTest {
         // Live writer/reader pairing — reader opens while writer is still
         // appending to segment 0. The reader's per-nextBatch re-query of
         // channel.size() lets it see new bytes.
-        try (WalWriter w = WalWriter.createNew(dir, 1 << 20, FsyncPolicy.BATCH, MAX_PAYLOAD);
+        try (WalWriter w = WalWriter.createNew(dir, 1 << 20, 1L << 30, OverflowPolicy.BACKPRESSURE, FsyncPolicy.BATCH, MAX_PAYLOAD);
              WalReader r = new WalReader(dir, 0, MAX_PAYLOAD)) {
 
             w.append("early".getBytes());
@@ -143,7 +144,7 @@ class WalWriterReaderTest {
     @Test
     void reader_starting_mid_wal_skips_earlier_data(@TempDir Path dir) throws IOException {
         long offsetAfterSecond;
-        try (WalWriter w = WalWriter.createNew(dir, 1 << 20, FsyncPolicy.BATCH, MAX_PAYLOAD)) {
+        try (WalWriter w = WalWriter.createNew(dir, 1 << 20, 1L << 30, OverflowPolicy.BACKPRESSURE, FsyncPolicy.BATCH, MAX_PAYLOAD)) {
             w.append("one".getBytes());
             offsetAfterSecond = w.append("two".getBytes());
             w.append("three".getBytes());
@@ -158,7 +159,7 @@ class WalWriterReaderTest {
     @Test
     void advanceTo_moves_reader_forward_without_a_read(@TempDir Path dir) throws IOException {
         long offsetAfterFirst;
-        try (WalWriter w = WalWriter.createNew(dir, 1 << 20, FsyncPolicy.BATCH, MAX_PAYLOAD)) {
+        try (WalWriter w = WalWriter.createNew(dir, 1 << 20, 1L << 30, OverflowPolicy.BACKPRESSURE, FsyncPolicy.BATCH, MAX_PAYLOAD)) {
             offsetAfterFirst = w.append("skip-me".getBytes());
             w.append("keep-me".getBytes());
             w.flush();
@@ -172,7 +173,7 @@ class WalWriterReaderTest {
 
     @Test
     void advanceTo_rejects_backward_movement(@TempDir Path dir) throws IOException {
-        try (WalWriter w = WalWriter.createNew(dir, 1 << 20, FsyncPolicy.BATCH, MAX_PAYLOAD)) {
+        try (WalWriter w = WalWriter.createNew(dir, 1 << 20, 1L << 30, OverflowPolicy.BACKPRESSURE, FsyncPolicy.BATCH, MAX_PAYLOAD)) {
             w.append("x".getBytes());
             w.flush();
         }
@@ -198,7 +199,7 @@ class WalWriterReaderTest {
         // the recovered segment (simulates a plugin restart with
         // in-flight writes).
         long endAfterFirst;
-        try (WalWriter w = WalWriter.createNew(dir, 1 << 20, FsyncPolicy.BATCH, MAX_PAYLOAD)) {
+        try (WalWriter w = WalWriter.createNew(dir, 1 << 20, 1L << 30, OverflowPolicy.BACKPRESSURE, FsyncPolicy.BATCH, MAX_PAYLOAD)) {
             w.append("before-stop".getBytes());
             endAfterFirst = w.currentOffset();
         }
@@ -207,7 +208,7 @@ class WalWriterReaderTest {
         Path segPath = WalSegment.segPathFor(dir, 0);
         WalSegment resumed = WalSegment.openForAppend(segPath, 0, FsyncPolicy.BATCH, MAX_PAYLOAD, 0);
         resumed.recover(); // no torn tail expected
-        try (WalWriter w = WalWriter.resume(dir, resumed, 1 << 20, FsyncPolicy.BATCH, MAX_PAYLOAD)) {
+        try (WalWriter w = WalWriter.resume(dir, resumed, 1 << 20, 1L << 30, OverflowPolicy.BACKPRESSURE, FsyncPolicy.BATCH, MAX_PAYLOAD)) {
             long offset = w.append("after-resume".getBytes());
             assertThat(offset).isGreaterThan(endAfterFirst);
             w.flush();
@@ -222,7 +223,7 @@ class WalWriterReaderTest {
 
     @Test
     void closing_writer_seals_active_segment(@TempDir Path dir) throws IOException {
-        try (WalWriter w = WalWriter.createNew(dir, 1 << 20, FsyncPolicy.BATCH, MAX_PAYLOAD)) {
+        try (WalWriter w = WalWriter.createNew(dir, 1 << 20, 1L << 30, OverflowPolicy.BACKPRESSURE, FsyncPolicy.BATCH, MAX_PAYLOAD)) {
             w.append("x".getBytes());
         }
         String idx = Files.readString(WalSegment.idxPathFor(dir, 0));
@@ -231,7 +232,7 @@ class WalWriterReaderTest {
 
     @Test
     void append_after_close_throws(@TempDir Path dir) throws IOException {
-        WalWriter w = WalWriter.createNew(dir, 1 << 20, FsyncPolicy.BATCH, MAX_PAYLOAD);
+        WalWriter w = WalWriter.createNew(dir, 1 << 20, 1L << 30, OverflowPolicy.BACKPRESSURE, FsyncPolicy.BATCH, MAX_PAYLOAD);
         w.close();
         assertThatThrownBy(() -> w.append("x".getBytes()))
                 .isInstanceOf(IllegalStateException.class);
