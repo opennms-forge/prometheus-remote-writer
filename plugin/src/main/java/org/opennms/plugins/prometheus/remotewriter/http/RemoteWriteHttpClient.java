@@ -44,8 +44,13 @@ public final class RemoteWriteHttpClient {
 
     private static final Logger LOG = LoggerFactory.getLogger(RemoteWriteHttpClient.class);
 
-    private static final MediaType CONTENT_TYPE = MediaType.get("application/x-protobuf");
-    private static final String REMOTE_WRITE_VERSION = "0.1.0";
+    /** v1 Content-Type — bare protobuf, no proto qualifier. */
+    private static final MediaType CONTENT_TYPE_V1 = MediaType.get("application/x-protobuf");
+    /** v2 Content-Type — qualified with the v2 message name. */
+    private static final MediaType CONTENT_TYPE_V2 =
+            MediaType.get("application/x-protobuf;proto=io.prometheus.write.v2.Request");
+    private static final String REMOTE_WRITE_VERSION_V1 = "0.1.0";
+    private static final String REMOTE_WRITE_VERSION_V2 = "2.0.0";
     private static final String USER_AGENT =
             "org.opennms.plugins.prometheus-remote-writer/" + pluginVersion();
 
@@ -194,10 +199,18 @@ public final class RemoteWriteHttpClient {
     // -- internals ----------------------------------------------------------
 
     private Request buildRequest(byte[] body) {
+        // Wire-version-aware Content-Type and X-Prometheus-Remote-Write-Version.
+        // Body bytes are produced by whichever builder the storage layer
+        // selected via RemoteWriteRequestBuilders.forVersion(...) — this
+        // method only sets the headers that match.
+        boolean v2 = config.getWireProtocolVersion() == 2;
+        MediaType contentType = v2 ? CONTENT_TYPE_V2 : CONTENT_TYPE_V1;
+        String rwVersion = v2 ? REMOTE_WRITE_VERSION_V2 : REMOTE_WRITE_VERSION_V1;
+
         Request.Builder b = new Request.Builder()
                 .url(config.getWriteUrl())
                 .addHeader("Content-Encoding", "snappy")
-                .addHeader("X-Prometheus-Remote-Write-Version", REMOTE_WRITE_VERSION)
+                .addHeader("X-Prometheus-Remote-Write-Version", rwVersion)
                 .addHeader("User-Agent", USER_AGENT);
 
         if (config.hasBasicAuth()) {
@@ -211,7 +224,7 @@ public final class RemoteWriteHttpClient {
         if (config.hasTenant()) {
             b.addHeader("X-Scope-OrgID", config.getTenantOrgId());
         }
-        b.post(RequestBody.create(body, CONTENT_TYPE));
+        b.post(RequestBody.create(body, contentType));
         return b.build();
     }
 

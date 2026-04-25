@@ -24,8 +24,12 @@ import org.opennms.plugins.prometheus.remotewriter.wal.WalReader;
 import org.opennms.plugins.prometheus.remotewriter.wal.WalReader.ReadResult;
 import org.opennms.plugins.prometheus.remotewriter.wal.WalWriter;
 import org.opennms.plugins.prometheus.remotewriter.wire.MappedSample;
+import java.util.Collection;
+import java.util.function.Function;
+
 import org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilder;
 import org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilder.BuildResult;
+import org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilders;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -69,6 +73,7 @@ public final class WalFlusher implements Closeable {
     private final int batchSize;
     private final long flushIntervalMs;
     private final PluginMetrics metrics;
+    private final Function<Collection<MappedSample>, BuildResult> builder;
 
     private WalReader reader;
     private volatile boolean running;
@@ -89,14 +94,37 @@ public final class WalFlusher implements Closeable {
      */
     private volatile int samplesDrainedSinceLastCheckpoint;
 
+    /**
+     * Test-only convenience constructor — hard-codes the v1 builder.
+     *
+     * <p><b>Do not use from production code.</b> The HTTP client selects
+     * v1/v2 headers from {@link
+     * org.opennms.plugins.prometheus.remotewriter.config.PrometheusRemoteWriterConfig#getWireProtocolVersion()};
+     * mixing this ctor with a {@code wire.protocol-version=2} config
+     * would emit v1-shaped bytes under v2 headers, which the backend
+     * rejects (or silently drops, on Prometheus 2.50–2.54). Production
+     * call sites must thread {@link
+     * RemoteWriteRequestBuilders#forVersion(int)
+     * RemoteWriteRequestBuilders.forVersion(config.getWireProtocolVersion())}
+     * into the explicit-builder constructor below.
+     */
     public WalFlusher(Path walDir, WalWriter writer, Checkpoint checkpoint,
                       int maxPayload, RemoteWriteHttpClient httpClient,
                       int batchSize, long flushIntervalMs, PluginMetrics metrics) {
+        this(walDir, writer, checkpoint, maxPayload, httpClient, batchSize,
+                flushIntervalMs, metrics, RemoteWriteRequestBuilders.forVersion(1));
+    }
+
+    public WalFlusher(Path walDir, WalWriter writer, Checkpoint checkpoint,
+                      int maxPayload, RemoteWriteHttpClient httpClient,
+                      int batchSize, long flushIntervalMs, PluginMetrics metrics,
+                      Function<Collection<MappedSample>, BuildResult> builder) {
         this.walDir          = Objects.requireNonNull(walDir);
         this.writer          = Objects.requireNonNull(writer);
         this.checkpoint      = Objects.requireNonNull(checkpoint);
         this.httpClient      = Objects.requireNonNull(httpClient);
         this.metrics         = Objects.requireNonNull(metrics);
+        this.builder         = Objects.requireNonNull(builder);
         if (batchSize < 1)       throw new IllegalArgumentException("batchSize must be >= 1");
         if (flushIntervalMs < 1) throw new IllegalArgumentException("flushIntervalMs must be >= 1");
         this.maxPayload      = maxPayload;
@@ -244,7 +272,7 @@ public final class WalFlusher implements Closeable {
             samples.add(WalEntryCodec.decode(payload));
         }
 
-        BuildResult built = RemoteWriteRequestBuilder.build(samples);
+        BuildResult built = builder.apply(samples);
         metrics.samplesDroppedNonfinite(built.samplesDroppedNonfinite());
         metrics.samplesDroppedDuplicate(built.samplesDroppedDuplicate());
         if (!built.hasContent()) {

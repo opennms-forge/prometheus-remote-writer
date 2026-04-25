@@ -17,8 +17,12 @@ import org.opennms.plugins.prometheus.remotewriter.http.RemoteWriteHttpClient;
 import org.opennms.plugins.prometheus.remotewriter.http.RemoteWriteHttpClient.WriteResult;
 import org.opennms.plugins.prometheus.remotewriter.metrics.PluginMetrics;
 import org.opennms.plugins.prometheus.remotewriter.wire.MappedSample;
+import java.util.Collection;
+import java.util.function.Function;
+
 import org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilder;
 import org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilder.BuildResult;
+import org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilders;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -49,15 +53,38 @@ public final class Flusher {
     private final int batchSize;
     private final long flushIntervalMs;
     private final PluginMetrics metrics;
+    private final Function<Collection<MappedSample>, BuildResult> builder;
 
     private volatile boolean running;
     private Thread thread;
 
+    /**
+     * Test-only convenience constructor — hard-codes the v1 builder.
+     *
+     * <p><b>Do not use from production code.</b> The HTTP client selects
+     * v1/v2 headers from {@link
+     * org.opennms.plugins.prometheus.remotewriter.config.PrometheusRemoteWriterConfig#getWireProtocolVersion()};
+     * mixing this ctor with a {@code wire.protocol-version=2} config
+     * would emit v1-shaped bytes under v2 headers, which the backend
+     * rejects (or silently drops, on Prometheus 2.50–2.54). Production
+     * call sites must thread {@link
+     * RemoteWriteRequestBuilders#forVersion(int)
+     * RemoteWriteRequestBuilders.forVersion(config.getWireProtocolVersion())}
+     * into the explicit-builder constructor below.
+     */
     public Flusher(SampleQueue queue, RemoteWriteHttpClient httpClient,
                    int batchSize, long flushIntervalMs, PluginMetrics metrics) {
+        this(queue, httpClient, batchSize, flushIntervalMs, metrics,
+                RemoteWriteRequestBuilders.forVersion(1));
+    }
+
+    public Flusher(SampleQueue queue, RemoteWriteHttpClient httpClient,
+                   int batchSize, long flushIntervalMs, PluginMetrics metrics,
+                   Function<Collection<MappedSample>, BuildResult> builder) {
         this.queue          = Objects.requireNonNull(queue);
         this.httpClient     = Objects.requireNonNull(httpClient);
         this.metrics        = Objects.requireNonNull(metrics);
+        this.builder        = Objects.requireNonNull(builder);
         if (batchSize < 1)       throw new IllegalArgumentException("batchSize must be >= 1");
         if (flushIntervalMs < 1) throw new IllegalArgumentException("flushIntervalMs must be >= 1");
         this.batchSize       = batchSize;
@@ -139,7 +166,7 @@ public final class Flusher {
 
     /** Package-private for unit tests — runs one flush iteration synchronously. */
     void flushBatch(List<MappedSample> batch) {
-        BuildResult built = RemoteWriteRequestBuilder.build(batch);
+        BuildResult built = builder.apply(batch);
         metrics.samplesDroppedNonfinite(built.samplesDroppedNonfinite());
         metrics.samplesDroppedDuplicate(built.samplesDroppedDuplicate());
         if (!built.hasContent()) {

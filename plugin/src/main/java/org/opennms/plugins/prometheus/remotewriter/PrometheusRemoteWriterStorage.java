@@ -88,6 +88,10 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
      */
     private static final AtomicInteger INSTANCE_ID_UNSET_WARN_COUNT = new AtomicInteger(0);
 
+    /** One-shot gate for the wire.protocol-version=2 startup WARN. */
+    private static final AtomicBoolean WIRE_V2_WARNED = new AtomicBoolean(false);
+    private static final AtomicInteger WIRE_V2_WARN_COUNT = new AtomicInteger(0);
+
     /**
      * Everything constructed at {@link #start()} time. Published as a unit via
      * the {@link #active} volatile so SPI callers can snapshot the whole
@@ -164,6 +168,7 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         }
 
         warnIfInstanceIdUnset();
+        warnIfWireV2();
 
         if (config.isWalEnabled()) {
             startWalMode();
@@ -185,7 +190,9 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
             q  = new SampleQueue(config.getQueueCapacity());
             wc = new RemoteWriteHttpClient(config);
             rc = new PrometheusReadClient(config);
-            f  = new Flusher(q, wc, config.getBatchSize(), config.getFlushIntervalMs(), m);
+            f  = new Flusher(q, wc, config.getBatchSize(), config.getFlushIntervalMs(), m,
+                    org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilders
+                            .forVersion(config.getWireProtocolVersion()));
 
             Active built = new Active(lm, q, wc, rc, f, null, null, null, null, m);
             registerGauges(built);
@@ -236,7 +243,9 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
             wc = new RemoteWriteHttpClient(config);
             rc = new PrometheusReadClient(config);
             wf = new WalFlusher(walDir, ww, recovered.checkpoint(), effectiveMaxPayload(),
-                    wc, config.getBatchSize(), config.getFlushIntervalMs(), m);
+                    wc, config.getBatchSize(), config.getFlushIntervalMs(), m,
+                    org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilders
+                            .forVersion(config.getWireProtocolVersion()));
 
             Active built = new Active(lm, null, wc, rc, null, ww, wf,
                     recovered.checkpoint(), walDir, m);
@@ -485,6 +494,25 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         }
     }
 
+    /**
+     * One-shot WARN naming the backend version requirements for v2.
+     * Fires once per JVM lifetime when {@code wire.protocol-version=2}
+     * is configured, so operators on older backends see a heads-up
+     * before their data starts hitting 4xx drops.
+     */
+    private void warnIfWireV2() {
+        if (config.getWireProtocolVersion() == 2
+                && WIRE_V2_WARNED.compareAndSet(false, true)) {
+            WIRE_V2_WARN_COUNT.incrementAndGet();
+            LOG.warn("PrometheusRemoteWriter: wire.protocol-version=2 is set. "
+                   + "Requires a v2-capable backend: Prometheus 2.50+, Mimir 2.10+, "
+                   + "VictoriaMetrics with v2 ingest enabled, Grafana Cloud, or "
+                   + "equivalent. Older backends will return 4xx and the batch is "
+                   + "dropped (see samples_dropped_4xx_total). Verify backend "
+                   + "compatibility before relying on this setting.");
+        }
+    }
+
     /** Lock guarding the two test-visible WARN-state fields so
      *  {@link #resetInstanceIdWarnedForTesting()} writes them atomically
      *  from a reader's perspective. */
@@ -522,6 +550,21 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
      *  proxy for the WARN, not a substitute for log capture.) */
     static int getInstanceIdWarnCountForTesting() {
         return INSTANCE_ID_UNSET_WARN_COUNT.get();
+    }
+
+    /** Visible for tests — resets the wire.protocol-version=2 startup
+     *  WARN gate and counter atomically. Mirrors the instance-id-warn
+     *  reset pattern. */
+    static void resetWireV2WarnedForTesting() {
+        synchronized (WARN_STATE_LOCK) {
+            WIRE_V2_WARNED.set(false);
+            WIRE_V2_WARN_COUNT.set(0);
+        }
+    }
+
+    /** Visible for tests — count of v2-WARN emissions in this JVM. */
+    static int getWireV2WarnCountForTesting() {
+        return WIRE_V2_WARN_COUNT.get();
     }
 
     private void logActivationOrDiff() {

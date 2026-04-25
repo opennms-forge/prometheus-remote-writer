@@ -7,6 +7,56 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`wire.protocol-version` configuration key** — operator-selectable
+  Prometheus Remote Write protocol version. Accepts `1` (default,
+  unchanged behavior) or `2` (Prometheus 3.0+ wire format with string
+  interning). Default `1` means existing deployments observe no
+  difference after upgrade. v2 reduces pre-snappy wire bytes by
+  interning each label name and value once per request rather than
+  per series; the savings depend on how heavily series share labels.
+- **Remote Write v2 wire format** — when `wire.protocol-version=2`, the
+  plugin emits `io.prometheus.write.v2.Request` payloads with
+  `Content-Type: application/x-protobuf;proto=io.prometheus.write.v2.Request`
+  and `X-Prometheus-Remote-Write-Version: 2.0.0`. The WAL is
+  wire-version-agnostic — flipping the knob with pending samples in
+  the WAL is safe; the next flush emits in the new version.
+- **One-shot startup WARN** when `wire.protocol-version=2` is set,
+  naming the required backend versions (Prometheus 3.0+ recommended,
+  Mimir 2.10+, VictoriaMetrics with v2, Grafana Cloud, or equivalent).
+  Older backends will return 4xx — or, on Prometheus 2.50–2.54,
+  *silently drop* the payload while ack'ing 2xx — so the WARN gives
+  operators a heads-up before the data starts hitting
+  `samples_dropped_4xx_total` (or worse, vanishing without a counter).
+
+### Backend compatibility
+
+- **v1 (default)**: any Prometheus / Mimir / VictoriaMetrics that
+  accepts Remote Write v1 — same as v0.2.0 and earlier.
+- **v2**: Prometheus 3.0+ recommended (default-enabled, stable
+  receiver). Prometheus 2.55+ works with
+  `--web.enable-remote-write-receiver` set explicitly. **Prometheus
+  2.50–2.54 ship an experimental v2 receiver that silently drops v2
+  payloads** under documented edge cases — do NOT rely on it; pin to
+  3.0+ instead. Mimir 2.10+, VictoriaMetrics with v2 ingest enabled,
+  Grafana Cloud, or equivalent are also supported. The plugin does
+  NOT auto-detect or fall back; an operator on an older backend who
+  flips to v2 will see 4xx drops (or silent loss on 2.50–2.54) until
+  they revert. Integration tests pin `prom/prometheus:v3.0.1`.
+
+### Out of scope
+
+- Native histograms — the v2 schema supports them but OpenNMS doesn't
+  produce them; the v2 builder leaves the field empty.
+- Exemplars — same; no trace-ID source in OpenNMS today.
+- Per-series metadata — same; no `help`/`unit` source on the OpenNMS
+  side.
+- Created-timestamp counter-reset signal — not populated.
+
+These are not breaking decisions; future changes can populate any of
+the v2 fields without modifying the wire layer added here.
+
 ## [0.2.0] — 2026-04-25
 
 ### Added
