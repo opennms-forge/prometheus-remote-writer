@@ -95,6 +95,13 @@ class PrometheusRemoteWriteWalV2IT {
             storage.store(List.of(sample(metricName, now.plusMillis(1), 2.0)));
             storage.store(List.of(sample(metricName, now.plusMillis(2), 3.0)));
             Thread.sleep(500); // let the flusher attempt and fail at least once
+            // ECONNREFUSED is a transport error: the checkpoint must NOT
+            // advance, and SAMPLES_WRITTEN must stay at 0. If this ever
+            // regresses (transport reclassified as 4xx → drop), phase 2
+            // would see an empty replay and the failure mode would point
+            // at replay rather than the actual classification bug.
+            assertThat(storage.getMetrics().snapshot()
+                    .get(PluginMetrics.SAMPLES_WRITTEN).longValue()).isZero();
             storage.stop();
             storage = null;
         }
@@ -112,6 +119,15 @@ class PrometheusRemoteWriteWalV2IT {
             assertThat(replayed).isGreaterThanOrEqualTo(3);
 
             awaitMetricInPrometheus(metricName, 3);
+
+            // Positive proof the v2 wire path was used: if v1 bytes had
+            // been sent under v2 headers, Prom 3.0.1 would 4xx the batch
+            // and SAMPLES_WRITTEN would never reach 3 (so awaitMetric
+            // would time out). Pinning samples_dropped_4xx==0 turns that
+            // failure mode from "await timeout" into a direct
+            // wire-format-mismatch signal.
+            assertThat(storage.getMetrics().snapshot()
+                    .get(PluginMetrics.SAMPLES_DROPPED_4XX).longValue()).isZero();
         }
     }
 
@@ -138,6 +154,10 @@ class PrometheusRemoteWriteWalV2IT {
             storage.store(List.of(sample(metricName, now.plusMillis(1), 2.0)));
             storage.store(List.of(sample(metricName, now.plusMillis(2), 3.0)));
             Thread.sleep(500);
+            // Same transport-classification check as scenario 1 — phase
+            // 1 must not have advanced the checkpoint.
+            assertThat(storage.getMetrics().snapshot()
+                    .get(PluginMetrics.SAMPLES_WRITTEN).longValue()).isZero();
             storage.stop();
             storage = null;
         }
@@ -157,6 +177,14 @@ class PrometheusRemoteWriteWalV2IT {
             assertThat(replayed).isGreaterThanOrEqualTo(3);
 
             awaitMetricInPrometheus(metricName, 3);
+
+            // Positive proof v2 was used (see scenario 1 for the
+            // reasoning). Especially load-bearing here: this scenario's
+            // raison d'être is that v1-era WAL samples must replay
+            // cleanly under v2; a 4xx tick would indicate the wire
+            // layer somehow leaked v1 bytes.
+            assertThat(storage.getMetrics().snapshot()
+                    .get(PluginMetrics.SAMPLES_DROPPED_4XX).longValue()).isZero();
         }
     }
 
