@@ -592,6 +592,61 @@ lost if the backend is unavailable for longer than
 `queue.capacity / sample-rate`; enable the WAL (below) to make the plugin
 durable across restarts and extended outages.
 
+## Wire format (v1 / v2)
+
+The plugin supports both Prometheus Remote Write protocol versions.
+Operator-selectable via `wire.protocol-version`:
+
+| Value | Wire format | Headers | Backend requirement |
+| --- | --- | --- | --- |
+| `1` (default) | snappy-compressed `prometheus.WriteRequest` | `Content-Type: application/x-protobuf`, `X-Prometheus-Remote-Write-Version: 0.1.0` | Any backend that accepts Remote Write v1 — Prometheus, Mimir, VictoriaMetrics, etc. |
+| `2` | snappy-compressed `io.prometheus.write.v2.Request` (string interning) | `Content-Type: application/x-protobuf;proto=io.prometheus.write.v2.Request`, `X-Prometheus-Remote-Write-Version: 2.0.0` | Prometheus 2.50+ (April 2024), Mimir 2.10+, VictoriaMetrics with v2 ingest enabled, Grafana Cloud, or equivalent. |
+
+### When to flip to v2
+
+- **Wire bandwidth** — v2's string interning eliminates the per-sample
+  repetition of label names. For typical OpenNMS batches (where every
+  series carries the same dozen-or-so default labels: `__name__`, `node`,
+  `job`, `instance`, ...), pre-snappy bytes drop 30-50%. After snappy
+  the savings are smaller but still material on volume.
+- **Forward capacity** — native histograms, exemplars, per-series
+  metadata, and created-timestamps are first-class in the v2 schema.
+  This plugin does not populate them today (OpenNMS doesn't produce
+  them), but enabling v2 unblocks future features without another
+  wire-format pivot.
+
+### When to leave it on v1
+
+- Backend compatibility is uncertain or includes older Prometheus /
+  Mimir / VM versions.
+- Wire bandwidth isn't a constraint for your deployment volume.
+
+### Operational notes
+
+- **No auto-fallback.** If `wire.protocol-version=2` is set but the
+  backend is v1-only, the backend returns 4xx and the batch is dropped
+  permanently (matches the existing 4xx semantics; visible via
+  `samples_dropped_4xx_total`). Verify backend compatibility BEFORE
+  flipping. The plugin emits a one-shot startup WARN naming the
+  supported backend versions when `wire.protocol-version=2` is set.
+- **WAL is wire-version-agnostic.** The on-disk WAL stores `MappedSample`
+  (pre-wire), so flipping `wire.protocol-version` while the WAL holds
+  pending samples is safe — the next flush emits according to the new
+  version, no WAL migration needed.
+- **No effect on the read path.** The plugin's read side
+  (`findMetrics`, `getTimeSeriesData`) uses the standard Prometheus
+  HTTP query API, which is independent of the remote-write version.
+
+### What v2 does NOT add (yet)
+
+- Native histograms — OpenNMS doesn't produce them.
+- Exemplars — no trace-ID source on the OpenNMS side.
+- Per-series metadata — no `help`/`unit` source today.
+- Created-timestamp counter-reset hint.
+
+The v2 wire layer in this release leaves these fields empty. A future
+change can populate any of them without breaking the wire layer.
+
 ## Write-Ahead Log (durable buffering)
 
 Opt-in via `wal.enabled=true`. When enabled, every `store()` sample is
