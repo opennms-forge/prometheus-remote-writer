@@ -6,6 +6,7 @@
  */
 package org.opennms.plugins.prometheus.remotewriter.queue;
 
+import java.io.Closeable;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -56,7 +57,7 @@ import org.slf4j.LoggerFactory;
  * replays on next start. The grace window controls only the in-flight
  * HTTP request deadline.
  */
-public final class WalFlusher {
+public final class WalFlusher implements Closeable {
 
     private static final Logger LOG = LoggerFactory.getLogger(WalFlusher.class);
 
@@ -152,6 +153,17 @@ public final class WalFlusher {
                 LOG.debug("wal-reader close: {}", e.getMessage());
             }
         }
+    }
+
+    /**
+     * Closeable contract — delegates to {@link #stop(long)} with a zero
+     * grace, useful in tests using try-with-resources. Production code
+     * uses the explicit {@link #stop(long)} with the operator's
+     * configured grace.
+     */
+    @Override
+    public void close() {
+        stop(0);
     }
 
     /** Current reader offset (for shutdown logging). */
