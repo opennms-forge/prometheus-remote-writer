@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] — 2026-04-25
 
 ### Added
 
@@ -82,7 +82,7 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an assertion failure and leak a stopped reference on a constructor or
   `start()` throw.
 
-## [0.4.0] — TBD
+## Internal milestone: default `job` + `instance` labels (folded into 0.2.0)
 
 ### Added
 
@@ -182,7 +182,7 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the value in edge cases. Re-apply via `config:edit` or the `.cfg` file if
   so.
 
-## [0.3.0] — TBD
+## Internal milestone: `labels.copy` primitive (folded into 0.2.0)
 
 ### Added
 
@@ -238,7 +238,7 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pre-copy series with post-copy series of the same count. No ongoing
   cardinality growth.
 
-## [0.2.0] — TBD
+## Internal milestone: label enrichment v0.2 (folded into 0.2.0)
 
 ### Breaking changes
 
