@@ -1011,6 +1011,48 @@ class PrometheusRemoteWriterConfigTest {
         }
     }
 
+    // ---------- wire.protocol-version --------------------------------------
+
+    @Test
+    void wire_protocol_version_default_is_one() {
+        assertThat(minimal().getWireProtocolVersion()).isEqualTo(1);
+    }
+
+    @Test
+    void wire_protocol_version_accepts_one_and_two() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setWireProtocolVersion("1");
+        assertThat(c.getWireProtocolVersion()).isEqualTo(1);
+        c.setWireProtocolVersion("2");
+        assertThat(c.getWireProtocolVersion()).isEqualTo(2);
+    }
+
+    @Test
+    void wire_protocol_version_blank_defaults_to_one() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setWireProtocolVersion("2");
+        assertThat(c.getWireProtocolVersion()).isEqualTo(2);
+        // Blank explicitly resets to default — same convention as wal.fsync.
+        c.setWireProtocolVersion("");
+        assertThat(c.getWireProtocolVersion()).isEqualTo(1);
+        c.setWireProtocolVersion("   ");
+        assertThat(c.getWireProtocolVersion()).isEqualTo(1);
+    }
+
+    @Test
+    void wire_protocol_version_rejects_unknown_values() {
+        PrometheusRemoteWriterConfig c = minimal();
+        assertThatThrownBy(() -> c.setWireProtocolVersion("3"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("wire.protocol-version")
+                .hasMessageContaining("3");
+        assertThatThrownBy(() -> c.setWireProtocolVersion("v2"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("wire.protocol-version");
+        assertThatThrownBy(() -> c.setWireProtocolVersion("nonsense"))
+                .isInstanceOf(IllegalStateException.class);
+    }
+
     // ---------- helpers -----------------------------------------------------
 
     private static PrometheusRemoteWriterConfig minimal() {

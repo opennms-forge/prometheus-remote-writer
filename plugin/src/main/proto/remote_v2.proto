@@ -1,0 +1,121 @@
+// Copyright 2026 The OpenNMS Group, Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+// Created by Ronny Trommer <ronny@opennms.com>
+//
+// Prometheus Remote Write v2.0.0 wire schema. Mirrors the upstream
+// io.prometheus.write.v2 messages from the Prometheus 2.50+ source
+// tree (prompb/io/prometheus/write/v2/types.proto). Field numbers and
+// names match the spec exactly so that requests built here are
+// byte-compatible with what a v2 receiver expects.
+//
+// The plugin emits only `Request.symbols`, `TimeSeries.labels_refs`,
+// and `TimeSeries.samples` today. The other fields (exemplars,
+// histograms, metadata, created_timestamp) are present in the schema
+// for protobuf-tooling completeness but stay default / empty on the
+// wire — see openspec/changes/add-remote-write-v2-support/design.md
+// §3 for the rationale.
+
+syntax = "proto3";
+package io.prometheus.write.v2;
+
+option java_package = "org.opennms.plugins.prometheus.remotewriter.wire.v2.proto";
+option java_multiple_files = true;
+
+message Request {
+  reserved 1 to 3;
+
+  // Symbol table — every distinct label name and label value across the
+  // batch appears here exactly once. Index 0 SHALL be the empty string
+  // (per the v2 spec). TimeSeries.labels_refs reference into this list
+  // as `(name_index, value_index)` pairs.
+  repeated string symbols = 4;
+
+  // The time series carried in this request.
+  repeated TimeSeries timeseries = 5;
+}
+
+message TimeSeries {
+  // Labels packed as `(name_index, value_index)` pairs into
+  // Request.symbols. labels_refs.size() is always even.
+  repeated uint32 labels_refs = 1;
+
+  repeated Sample samples = 2;
+  repeated Exemplar exemplars = 3;
+  repeated Histogram histograms = 4;
+  Metadata metadata = 5;
+
+  // Created-timestamp for proper counter reset detection on the
+  // receiving end. Milliseconds since Unix epoch. 0 means "unset" — the
+  // plugin does not populate this today.
+  int64 created_timestamp = 6;
+}
+
+message Sample {
+  double value = 1;
+  // Milliseconds since Unix epoch.
+  int64 timestamp = 2;
+}
+
+message Exemplar {
+  // Reserved label-ref pairs into Request.symbols (e.g. for trace IDs).
+  repeated uint32 labels_refs = 1;
+  double value = 2;
+  int64 timestamp = 3;
+}
+
+message Histogram {
+  // Stub — the plugin does not emit native histograms today. Fields
+  // mirror the spec for compatibility but stay default. When OpenNMS
+  // gains a histogram source, populate per the upstream definition.
+  oneof count {
+    uint64 count_int = 1;
+    double count_float = 2;
+  }
+  double sum = 3;
+  int32 schema = 4;
+  double zero_threshold = 5;
+  oneof zero_count {
+    uint64 zero_count_int = 6;
+    double zero_count_float = 7;
+  }
+  repeated BucketSpan negative_spans = 8;
+  repeated int64 negative_deltas = 9;
+  repeated double negative_counts = 10;
+  repeated BucketSpan positive_spans = 11;
+  repeated int64 positive_deltas = 12;
+  repeated double positive_counts = 13;
+  ResetHint reset_hint = 14;
+  int64 timestamp = 15;
+  repeated double custom_values = 16;
+
+  enum ResetHint {
+    RESET_HINT_UNSPECIFIED = 0;
+    RESET_HINT_YES = 1;
+    RESET_HINT_NO = 2;
+    RESET_HINT_GAUGE = 3;
+  }
+}
+
+message BucketSpan {
+  sint32 offset = 1;
+  uint32 length = 2;
+}
+
+message Metadata {
+  enum MetricType {
+    METRIC_TYPE_UNSPECIFIED = 0;
+    METRIC_TYPE_COUNTER = 1;
+    METRIC_TYPE_GAUGE = 2;
+    METRIC_TYPE_HISTOGRAM = 3;
+    METRIC_TYPE_GAUGEHISTOGRAM = 4;
+    METRIC_TYPE_SUMMARY = 5;
+    METRIC_TYPE_INFO = 6;
+    METRIC_TYPE_STATESET = 7;
+  }
+  MetricType type = 1;
+  // Index into Request.symbols for the help text. 0 = empty string = unset.
+  uint32 help_ref = 3;
+  // Index into Request.symbols for the unit. 0 = empty string = unset.
+  uint32 unit_ref = 4;
+}

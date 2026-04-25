@@ -17,8 +17,12 @@ import org.opennms.plugins.prometheus.remotewriter.http.RemoteWriteHttpClient;
 import org.opennms.plugins.prometheus.remotewriter.http.RemoteWriteHttpClient.WriteResult;
 import org.opennms.plugins.prometheus.remotewriter.metrics.PluginMetrics;
 import org.opennms.plugins.prometheus.remotewriter.wire.MappedSample;
+import java.util.Collection;
+import java.util.function.Function;
+
 import org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilder;
 import org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilder.BuildResult;
+import org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilders;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -49,15 +53,28 @@ public final class Flusher {
     private final int batchSize;
     private final long flushIntervalMs;
     private final PluginMetrics metrics;
+    private final Function<Collection<MappedSample>, BuildResult> builder;
 
     private volatile boolean running;
     private Thread thread;
 
+    /**
+     * Backwards-compatible constructor — defaults to v1 wire format.
+     * Used by tests that don't care about the wire-version branch.
+     */
     public Flusher(SampleQueue queue, RemoteWriteHttpClient httpClient,
                    int batchSize, long flushIntervalMs, PluginMetrics metrics) {
+        this(queue, httpClient, batchSize, flushIntervalMs, metrics,
+                RemoteWriteRequestBuilders.forVersion(1));
+    }
+
+    public Flusher(SampleQueue queue, RemoteWriteHttpClient httpClient,
+                   int batchSize, long flushIntervalMs, PluginMetrics metrics,
+                   Function<Collection<MappedSample>, BuildResult> builder) {
         this.queue          = Objects.requireNonNull(queue);
         this.httpClient     = Objects.requireNonNull(httpClient);
         this.metrics        = Objects.requireNonNull(metrics);
+        this.builder        = Objects.requireNonNull(builder);
         if (batchSize < 1)       throw new IllegalArgumentException("batchSize must be >= 1");
         if (flushIntervalMs < 1) throw new IllegalArgumentException("flushIntervalMs must be >= 1");
         this.batchSize       = batchSize;
@@ -139,7 +156,7 @@ public final class Flusher {
 
     /** Package-private for unit tests — runs one flush iteration synchronously. */
     void flushBatch(List<MappedSample> batch) {
-        BuildResult built = RemoteWriteRequestBuilder.build(batch);
+        BuildResult built = builder.apply(batch);
         metrics.samplesDroppedNonfinite(built.samplesDroppedNonfinite());
         metrics.samplesDroppedDuplicate(built.samplesDroppedDuplicate());
         if (!built.hasContent()) {

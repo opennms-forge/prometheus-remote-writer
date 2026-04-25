@@ -60,6 +60,8 @@
             <cm:property name="metadata.exclude"       value=""/>
             <cm:property name="metadata.label-prefix"  value="onms_meta_"/>
             <cm:property name="metadata.case"          value="preserve"/>
+            <!-- Wire format -->
+            <cm:property name="wire.protocol-version"  value="1"/>
             <!-- Write-Ahead Log -->
             <cm:property name="wal.enabled"            value="false"/>
             <cm:property name="wal.path"               value=""/>
@@ -108,6 +110,7 @@
         <property name="metadataExclude"         value="${metadata.exclude}"/>
         <property name="metadataLabelPrefix"     value="${metadata.label-prefix}"/>
         <property name="metadataCase"            value="${metadata.case}"/>
+        <property name="wireProtocolVersion"     value="${wire.protocol-version}"/>
         <property name="walEnabled"              value="${wal.enabled}"/>
         <property name="walPath"                 value="${wal.path}"/>
         <property name="walMaxSizeBytes"         value="${wal.max-size-bytes}"/>

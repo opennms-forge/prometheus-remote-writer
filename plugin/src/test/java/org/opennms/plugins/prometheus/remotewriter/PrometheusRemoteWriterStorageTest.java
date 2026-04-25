@@ -46,10 +46,11 @@ import org.opennms.plugins.prometheus.remotewriter.metrics.PluginMetrics;
 class PrometheusRemoteWriterStorageTest {
 
     @BeforeEach
-    void resetInstanceIdWarnGate() {
-        // The WARN gate is a static one-shot; tests that start more than one
-        // storage bean need a clean slate so the gate can be observed flipping.
+    void resetWarnGates() {
+        // The WARN gates are static one-shots; tests that start more than one
+        // storage bean need a clean slate so the gates can be observed flipping.
         PrometheusRemoteWriterStorage.resetInstanceIdWarnedForTesting();
+        PrometheusRemoteWriterStorage.resetWireV2WarnedForTesting();
     }
 
     // ---------- instance.id startup WARN ------------------------------------
@@ -232,6 +233,54 @@ class PrometheusRemoteWriterStorageTest {
         c.setWriteUrl("https://example.com/api/v1/push");
         c.setReadUrl("https://example.com/prometheus");
         return c;
+    }
+
+    // ---------- wire.protocol-version=2 startup WARN ------------------------
+
+    @Test
+    void wire_v2_trips_the_warn_gate_on_start() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setWireProtocolVersion("2");
+        PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(c);
+        assertThat(PrometheusRemoteWriterStorage.getWireV2WarnCountForTesting()).isZero();
+        s.start();
+        try {
+            assertThat(PrometheusRemoteWriterStorage.getWireV2WarnCountForTesting()).isEqualTo(1);
+        } finally {
+            s.stop();
+        }
+    }
+
+    @Test
+    void wire_v1_default_does_not_trip_the_v2_warn_gate() {
+        PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(minimal());
+        s.start();
+        try {
+            assertThat(PrometheusRemoteWriterStorage.getWireV2WarnCountForTesting()).isZero();
+        } finally {
+            s.stop();
+        }
+    }
+
+    @Test
+    void wire_v2_warn_count_does_not_increment_on_hot_reload() {
+        // The static one-shot semantic: even if blueprint rebuilds the
+        // bean repeatedly with wire.protocol-version=2, the WARN fires
+        // exactly once per JVM lifetime.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setWireProtocolVersion("2");
+        PrometheusRemoteWriterStorage first = new PrometheusRemoteWriterStorage(c);
+        first.start();
+        first.stop();
+        assertThat(PrometheusRemoteWriterStorage.getWireV2WarnCountForTesting()).isEqualTo(1);
+
+        PrometheusRemoteWriterStorage second = new PrometheusRemoteWriterStorage(c);
+        second.start();
+        try {
+            assertThat(PrometheusRemoteWriterStorage.getWireV2WarnCountForTesting()).isEqualTo(1);
+        } finally {
+            second.stop();
+        }
     }
 
     // ---------- end-to-end store() flow ------------------------------------

@@ -116,6 +116,17 @@ public class PrometheusRemoteWriterConfig {
     private String       metadataLabelPrefix = "onms_meta_";
     private MetadataCase metadataCase        = MetadataCase.PRESERVE;
 
+    // --- Wire format ---
+    /** Prometheus Remote Write protocol version on the wire. {@code 1}
+     *  emits the existing v1 format (no behavior change for existing
+     *  deployments). {@code 2} emits the Prometheus 2.50+ v2 format with
+     *  string interning — requires a v2-capable backend (Prometheus
+     *  ≥2.50, Mimir ≥2.10, VictoriaMetrics with v2, Grafana Cloud, or
+     *  equivalent). The WAL is wire-version-agnostic, so flipping this
+     *  knob with pending samples in the WAL is safe — the next flush
+     *  emits according to the new value. */
+    private int wireProtocolVersion = 1;
+
     // --- Write-Ahead Log (WAL) ---
     /** Whether to durably persist samples to disk before ack'ing store().
      *  When false (default), samples buffer in memory via queue.capacity and
@@ -659,6 +670,23 @@ public class PrometheusRemoteWriterConfig {
         }
     }
 
+    public void setWireProtocolVersion(String v) {
+        // Treat null, empty, AND whitespace-only as "use default" so an
+        // operator config of `wire.protocol-version =   ` doesn't throw.
+        // Mirrors the wal.fsync / wal.overflow handling above.
+        String normalized = blankToNull(v);
+        if (normalized == null) {
+            wireProtocolVersion = 1;
+            return;
+        }
+        switch (normalized) {
+            case "1" -> wireProtocolVersion = 1;
+            case "2" -> wireProtocolVersion = 2;
+            default -> throw new IllegalStateException(
+                "wire.protocol-version must be '1' or '2', got: " + v);
+        }
+    }
+
     public void setWalOverflow(String v) {
         if (isBlank(v)) {
             walOverflow = WalWriter.OverflowPolicy.BACKPRESSURE;
@@ -725,6 +753,8 @@ public class PrometheusRemoteWriterConfig {
     public long    getWalSegmentSizeBytes()             { return walSegmentSizeBytes; }
     public WalSegment.FsyncPolicy    getWalFsync()      { return walFsync; }
     public WalWriter.OverflowPolicy  getWalOverflow()   { return walOverflow; }
+
+    public int getWireProtocolVersion() { return wireProtocolVersion; }
 
     /**
      * Resolve {@link #walPath} to an absolute directory path. If the

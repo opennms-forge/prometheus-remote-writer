@@ -67,6 +67,24 @@ class RemoteWriteHttpClientTest {
         assertThat(req.getBody().readByteArray()).isEqualTo(PAYLOAD);
     }
 
+    @Test
+    void v2_headers_use_proto_qualifier_and_version_2_0_0() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(204));
+        PrometheusRemoteWriterConfig c = cfg(server);
+        c.setWireProtocolVersion("2");
+        client = newClient(c);
+
+        client.write(PAYLOAD);
+
+        RecordedRequest req = server.takeRequest();
+        // Content-Type carries the proto= qualifier per the v2 spec —
+        // OkHttp may add a charset suffix; assert prefix.
+        assertThat(req.getHeader("Content-Type"))
+                .startsWith("application/x-protobuf;proto=io.prometheus.write.v2.Request");
+        assertThat(req.getHeader("Content-Encoding")).isEqualTo("snappy");
+        assertThat(req.getHeader("X-Prometheus-Remote-Write-Version")).isEqualTo("2.0.0");
+    }
+
     // ---------- auth permutations ------------------------------------------
 
     @Test
