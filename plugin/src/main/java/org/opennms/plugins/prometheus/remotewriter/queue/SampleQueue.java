@@ -26,8 +26,12 @@ import org.opennms.plugins.prometheus.remotewriter.wire.MappedSample;
  * backpressure contract: the plugin pushes the signal back to OpenNMS rather
  * than silently absorbing overruns.
  *
- * <p>v0.1 has no durable on-disk buffer — samples are lost on process restart.
- * A WAL is deferred to v0.2.
+ * <p>This class backs the {@code wal.enabled=false} path. When the operator
+ * enables the WAL ({@code wal.enabled=true}), the {@link WalFlusher} replaces
+ * this queue + {@link Flusher} pair with a durable on-disk pipeline that
+ * survives process restart and extended endpoint outages. See
+ * {@link org.opennms.plugins.prometheus.remotewriter.wal} for the WAL
+ * subsystem and the README for the operator trade-offs.
  */
 public final class SampleQueue {
 

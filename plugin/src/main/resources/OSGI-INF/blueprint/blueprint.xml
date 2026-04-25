@@ -60,6 +60,13 @@
             <cm:property name="metadata.exclude"       value=""/>
             <cm:property name="metadata.label-prefix"  value="onms_meta_"/>
             <cm:property name="metadata.case"          value="preserve"/>
+            <!-- Write-Ahead Log -->
+            <cm:property name="wal.enabled"            value="false"/>
+            <cm:property name="wal.path"               value=""/>
+            <cm:property name="wal.max-size-bytes"     value="536870912"/>
+            <cm:property name="wal.segment-size-bytes" value="67108864"/>
+            <cm:property name="wal.fsync"              value="batch"/>
+            <cm:property name="wal.overflow"           value="backpressure"/>
         </cm:default-properties>
     </cm:property-placeholder>
 
@@ -101,6 +108,12 @@
         <property name="metadataExclude"         value="${metadata.exclude}"/>
         <property name="metadataLabelPrefix"     value="${metadata.label-prefix}"/>
         <property name="metadataCase"            value="${metadata.case}"/>
+        <property name="walEnabled"              value="${wal.enabled}"/>
+        <property name="walPath"                 value="${wal.path}"/>
+        <property name="walMaxSizeBytes"         value="${wal.max-size-bytes}"/>
+        <property name="walSegmentSizeBytes"     value="${wal.segment-size-bytes}"/>
+        <property name="walFsync"                value="${wal.fsync}"/>
+        <property name="walOverflow"             value="${wal.overflow}"/>
     </bean>
 
     <!--

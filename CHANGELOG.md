@@ -9,6 +9,38 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Write-Ahead Log (WAL)** — optional, opt-in via `wal.enabled=false`
+  (default). When enabled, the plugin durably persists every mapped
+  sample to disk before ack'ing `store()`; the WAL replaces the
+  in-memory `ArrayBlockingQueue` as source of truth, so samples survive
+  process restart AND extended endpoint outages. Six new config keys:
+  - `wal.enabled` (bool, default `false`)
+  - `wal.path` (default `${karaf.data}/prometheus-remote-writer/wal`)
+  - `wal.max-size-bytes` (default 512 MB — total footprint cap)
+  - `wal.segment-size-bytes` (default 64 MB — per-segment rotation)
+  - `wal.fsync` (`always | batch | never`, default `batch` — fsync at
+    flush-interval boundary)
+  - `wal.overflow` (`backpressure | drop-oldest`, default `backpressure`
+    — matches v0.4 queue-full semantics)
+
+  On-disk format: length-prefixed protobuf `WalEntry` frames with
+  CRC32C; rotating segment files (`00000000000000000000.seg`, ...);
+  companion `.idx` jsonl per segment; `checkpoint.json` tracks the
+  last offset confirmed shipped. Crash recovery scans the newest
+  segment, truncates any torn tail, and replays from the checkpoint.
+  See README "Write-Ahead Log" for operator guidance.
+
+- **Eight new metrics** (wal.enabled=true only), surfaced via
+  `opennms:prometheus-writer-stats`:
+  - Counters: `wal_bytes_written_total`,
+    `wal_bytes_checkpointed_total` (bytes that moved past the
+    durable checkpoint), `wal_replay_samples_total` (one-shot
+    at startup), `wal_batches_dropped_4xx_total`,
+    `samples_dropped_wal_full_total`,
+    `wal_frames_dropped_corrupted_total` (sealed-segment
+    skips due to bit rot / torn frames)
+  - Gauges: `wal_disk_usage_bytes`, `wal_segments_active`
+
 - **`samples_unparseable_resource_id_total` counter** — increments once per
   sample whose `resourceId` tag failed all parser grammars (bracketed,
   slash-FS, slash-DB) or was absent. Surfaced via
@@ -16,6 +48,24 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   counters. Lets operators see the v0.4 "catch-all `job=opennms`" bucket
   size without grepping logs — a non-zero rate signals config drift, a new
   resourceId shape, or unexpected upstream input.
+
+### Changed
+
+- **`shutdown.grace-period-ms` semantic shift when `wal.enabled=true`** —
+  the knob now bounds the wait for the flusher loop to exit cleanly,
+  rather than a data-drain window. (Note: `Thread.interrupt()` does
+  not cancel an in-flight OkHttp call, so a worker blocked on a dead
+  TCP connection may continue past the grace window until
+  `http.read-timeout-ms`; the HTTP client is shut down right after
+  the grace, which is what actually breaks the call.) WAL durability
+  means no sample is lost at shutdown regardless of grace value;
+  anything unshipped replays on next start. Operators who set a large
+  grace value (e.g., 60_000) for drain-safety under v0.4 can safely
+  reduce it. The `wal.enabled=false` path (default) retains the v0.4
+  drain-or-lose semantics exactly.
+- **`queue.capacity` ignored when `wal.enabled=true`** — WARN logged
+  at startup if the operator explicitly sets it. The WAL replaces the
+  in-memory queue; size via `wal.max-size-bytes` instead.
 
 ### Tests
 

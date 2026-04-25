@@ -21,6 +21,8 @@ import java.util.Set;
 
 import org.opennms.plugins.prometheus.remotewriter.mapper.LabelMapper;
 import org.opennms.plugins.prometheus.remotewriter.sanitize.Sanitizer;
+import org.opennms.plugins.prometheus.remotewriter.wal.WalSegment;
+import org.opennms.plugins.prometheus.remotewriter.wal.WalWriter;
 
 /**
  * Plugin configuration. Blueprint sets each property individually through the
@@ -113,6 +115,46 @@ public class PrometheusRemoteWriterConfig {
     private String       metadataExclude;
     private String       metadataLabelPrefix = "onms_meta_";
     private MetadataCase metadataCase        = MetadataCase.PRESERVE;
+
+    // --- Write-Ahead Log (WAL) ---
+    /** Whether to durably persist samples to disk before ack'ing store().
+     *  When false (default), samples buffer in memory via queue.capacity and
+     *  are lost on process restart — matching v0.4 behavior. When true, the
+     *  plugin maintains a Write-Ahead Log at {@link #walPath} and replaces
+     *  the in-memory queue as source of truth; queue.capacity is ignored
+     *  with a startup WARN. See the "Write-Ahead Log" section of the
+     *  README for disk-space planning. */
+    private boolean walEnabled;
+
+    /** Directory for WAL segments + checkpoint. Empty (default) resolves
+     *  to {@code ${karaf.data}/prometheus-remote-writer/wal} at startup.
+     *  Operators running containerised Karaf with an ephemeral
+     *  {@code ${karaf.data}} MUST set this to a mounted volume or the WAL
+     *  will evaporate across restarts (undermining its whole point). */
+    private String walPath = "";
+
+    /** Total on-disk footprint cap. Reached → {@link #walOverflow} policy
+     *  kicks in. Default 512 MB. */
+    private long walMaxSizeBytes = 536_870_912L;
+
+    /** Per-segment rotation threshold. A new segment is opened when the
+     *  active one crosses this size. Smaller = more segments = more
+     *  syscalls for listing / GC; larger = fewer but coarser GC unit.
+     *  Default 64 MB. */
+    private long walSegmentSizeBytes = 67_108_864L;
+
+    /** Fsync policy: {@code always} (fsync every append; tightest RPO,
+     *  lowest throughput), {@code batch} (fsync at flush-interval
+     *  boundary; loses at most ~flush-interval-ms of samples on kill -9),
+     *  {@code never} (OS page cache only; suitable for ephemeral
+     *  deployments). Default {@code batch}. */
+    private WalSegment.FsyncPolicy walFsync = WalSegment.FsyncPolicy.BATCH;
+
+    /** Overflow policy when {@link #walMaxSizeBytes} is reached:
+     *  {@code backpressure} — new samples refused with StorageException
+     *  (matches v0.4 queue-full semantics, default); {@code drop-oldest}
+     *  — evict the oldest segment to make room. */
+    private WalWriter.OverflowPolicy walOverflow = WalWriter.OverflowPolicy.BACKPRESSURE;
 
     /**
      * Validate a fully populated config. Called by Blueprint's {@code init-method}
@@ -207,6 +249,31 @@ public class PrometheusRemoteWriterConfig {
                     + " (Prometheus label-value cap). Pick a shorter value.");
             }
         }
+
+        validateWal();
+    }
+
+    private void validateWal() {
+        if (!walEnabled) return; // all other wal.* fields are ignored when disabled
+        if (walMaxSizeBytes <= 0) {
+            throw new IllegalStateException(
+                "wal.max-size-bytes must be > 0 when wal.enabled=true (got " + walMaxSizeBytes + ")");
+        }
+        if (walSegmentSizeBytes <= 0) {
+            throw new IllegalStateException(
+                "wal.segment-size-bytes must be > 0 when wal.enabled=true (got " + walSegmentSizeBytes + ")");
+        }
+        if (walSegmentSizeBytes > walMaxSizeBytes) {
+            throw new IllegalStateException(
+                "wal.segment-size-bytes (" + walSegmentSizeBytes + ") must not exceed "
+                + "wal.max-size-bytes (" + walMaxSizeBytes + ") — otherwise a single "
+                + "segment alone could fill the cap and leave nothing to evict under "
+                + "drop-oldest");
+        }
+        // wal.path resolution is deferred to resolveWalPath() since Blueprint
+        // may read karaf.data lazily; validate() only enforces the
+        // syntactically-required fields here. Physical-path writability is
+        // checked in WalRecovery at startup.
     }
 
     /**
@@ -570,6 +637,42 @@ public class PrometheusRemoteWriterConfig {
                 "metadata.case must be 'preserve' or 'snake_case', got: " + v);
         }
     }
+
+    // --- WAL setters ---------------------------------------------------------
+
+    public void setWalEnabled(boolean v)        { walEnabled = v; }
+    public void setWalPath(String v)            { walPath = v == null ? "" : v.trim(); }
+    public void setWalMaxSizeBytes(long v)      { walMaxSizeBytes = v; }
+    public void setWalSegmentSizeBytes(long v)  { walSegmentSizeBytes = v; }
+
+    public void setWalFsync(String v) {
+        if (isBlank(v)) {
+            walFsync = WalSegment.FsyncPolicy.BATCH;
+            return;
+        }
+        String normalized = v.trim().toUpperCase();
+        try {
+            walFsync = WalSegment.FsyncPolicy.valueOf(normalized);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalStateException(
+                "wal.fsync must be 'always', 'batch', or 'never', got: " + v);
+        }
+    }
+
+    public void setWalOverflow(String v) {
+        if (isBlank(v)) {
+            walOverflow = WalWriter.OverflowPolicy.BACKPRESSURE;
+            return;
+        }
+        // Normalise to the enum grammar: "drop-oldest" → "DROP_OLDEST".
+        String normalized = v.trim().toUpperCase().replace('-', '_');
+        try {
+            walOverflow = WalWriter.OverflowPolicy.valueOf(normalized);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalStateException(
+                "wal.overflow must be 'backpressure' or 'drop-oldest', got: " + v);
+        }
+    }
     // Aries Blueprint requires at least one setter to match the getter's
     // return type (JavaBean property contract). Without this overload the
     // String setter above is the only pairing candidate and blueprint
@@ -613,6 +716,39 @@ public class PrometheusRemoteWriterConfig {
     public String  getMetadataExclude()       { return metadataExclude; }
     public String  getMetadataLabelPrefix()   { return metadataLabelPrefix; }
     public MetadataCase getMetadataCase()     { return metadataCase; }
+
+    // --- WAL getters ---------------------------------------------------------
+
+    public boolean isWalEnabled()                       { return walEnabled; }
+    public String  getWalPath()                         { return walPath; }
+    public long    getWalMaxSizeBytes()                 { return walMaxSizeBytes; }
+    public long    getWalSegmentSizeBytes()             { return walSegmentSizeBytes; }
+    public WalSegment.FsyncPolicy    getWalFsync()      { return walFsync; }
+    public WalWriter.OverflowPolicy  getWalOverflow()   { return walOverflow; }
+
+    /**
+     * Resolve {@link #walPath} to an absolute directory path. If the
+     * operator set a non-blank value, it's returned verbatim. If blank
+     * (the default), resolves to {@code ${karaf.data}/prometheus-remote-writer/wal}
+     * using the {@code karaf.data} system property.
+     *
+     * <p>Intended to be called only when {@link #isWalEnabled()} is true.
+     *
+     * @throws IllegalStateException if the path is unresolvable (blank
+     *   wal.path AND no karaf.data system property) — operator must set
+     *   an explicit wal.path outside Karaf.
+     */
+    public String resolveWalPath() {
+        if (!isBlank(walPath)) return walPath;
+        String karafData = System.getProperty("karaf.data");
+        if (karafData == null || karafData.isEmpty()) {
+            throw new IllegalStateException(
+                "wal.enabled=true but wal.path is empty and the karaf.data "
+                + "system property is not set — either set wal.path explicitly "
+                + "or run inside a Karaf instance where karaf.data is available");
+        }
+        return karafData + "/prometheus-remote-writer/wal";
+    }
 
     // ---------- helpers -------------------------------------------------------
 

@@ -9,6 +9,9 @@
  */
 package org.opennms.plugins.prometheus.remotewriter;
 
+import java.io.IOException;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -35,7 +38,15 @@ import org.opennms.plugins.prometheus.remotewriter.mapper.LabelMapper;
 import org.opennms.plugins.prometheus.remotewriter.metrics.PluginMetrics;
 import org.opennms.plugins.prometheus.remotewriter.queue.Flusher;
 import org.opennms.plugins.prometheus.remotewriter.queue.SampleQueue;
+import org.opennms.plugins.prometheus.remotewriter.queue.WalFlusher;
 import org.opennms.plugins.prometheus.remotewriter.read.PrometheusReadClient;
+import org.opennms.plugins.prometheus.remotewriter.wal.Checkpoint;
+import org.opennms.plugins.prometheus.remotewriter.wal.WalEntryCodec;
+import org.opennms.plugins.prometheus.remotewriter.wal.WalFullException;
+import org.opennms.plugins.prometheus.remotewriter.wal.WalRecovery;
+import org.opennms.plugins.prometheus.remotewriter.wal.WalRecovery.RecoveredWal;
+import org.opennms.plugins.prometheus.remotewriter.wal.WalSegment;
+import org.opennms.plugins.prometheus.remotewriter.wal.WalWriter;
 import org.opennms.plugins.prometheus.remotewriter.wire.MappedSample;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -81,14 +92,32 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
      * Everything constructed at {@link #start()} time. Published as a unit via
      * the {@link #active} volatile so SPI callers can snapshot the whole
      * pipeline without worrying about partial views.
+     *
+     * <p>Two modes share this record:
+     * <ul>
+     *   <li><b>Queue mode</b> (wal.enabled=false, v0.4 default): {@code queue}
+     *       and {@code flusher} are non-null; all WAL fields are null.</li>
+     *   <li><b>WAL mode</b> (wal.enabled=true): {@code walWriter},
+     *       {@code walFlusher}, {@code checkpoint}, {@code walDir} are
+     *       non-null; {@code queue} and {@code flusher} are null.</li>
+     * </ul>
+     * The {@code walEnabled()} convenience tells SPI methods which branch
+     * to take without re-reading config (immune to hot-reload mid-call).
      */
     private record Active(
             LabelMapper           labelMapper,
-            SampleQueue           queue,
+            SampleQueue           queue,          // queue mode only
             RemoteWriteHttpClient writeClient,
             PrometheusReadClient  readClient,
-            Flusher               flusher,
-            PluginMetrics         metrics) {}
+            Flusher               flusher,        // queue mode only
+            WalWriter             walWriter,      // WAL mode only
+            WalFlusher            walFlusher,     // WAL mode only
+            Checkpoint            checkpoint,     // WAL mode only
+            Path                  walDir,         // WAL mode only
+            PluginMetrics         metrics) {
+
+        boolean walEnabled() { return walWriter != null; }
+    }
 
     private final PrometheusRemoteWriterConfig config;
     private volatile Active active;
@@ -136,6 +165,14 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
 
         warnIfInstanceIdUnset();
 
+        if (config.isWalEnabled()) {
+            startWalMode();
+        } else {
+            startQueueMode();
+        }
+    }
+
+    private void startQueueMode() {
         PluginMetrics         m  = null;
         LabelMapper           lm = null;
         SampleQueue           q  = null;
@@ -150,19 +187,83 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
             rc = new PrometheusReadClient(config);
             f  = new Flusher(q, wc, config.getBatchSize(), config.getFlushIntervalMs(), m);
 
-            Active built = new Active(lm, q, wc, rc, f, m);
+            Active built = new Active(lm, q, wc, rc, f, null, null, null, null, m);
             registerGauges(built);
             logActivationOrDiff();
             f.start();
-            // Publish last — readers that see a non-null active are guaranteed
-            // to see every collaborator fully constructed.
             active = built;
         } catch (RuntimeException e) {
-            // Roll back in reverse construction order. Swallow secondary
-            // failures so the original exception surfaces.
-            rollbackStart(f, wc, rc);
+            rollbackStart(f, null, wc, rc, null);
             throw e;
         }
+    }
+
+    private void startWalMode() {
+        // Operator-visible one-shot WARN if queue.capacity was explicitly
+        // set — under wal.enabled=true, it is ignored. We log rather than
+        // fail because the default (10_000) is harmless; operators who
+        // did set it may otherwise wonder where their config went.
+        if (config.getQueueCapacity() != 10_000) {
+            LOG.warn("queue.capacity={} is ignored when wal.enabled=true; "
+                    + "the WAL replaces the in-memory queue as source of truth. "
+                    + "Size the WAL via wal.max-size-bytes instead.",
+                    config.getQueueCapacity());
+        }
+
+        PluginMetrics         m  = null;
+        LabelMapper           lm = null;
+        RemoteWriteHttpClient wc = null;
+        PrometheusReadClient  rc = null;
+        WalWriter             ww = null;
+        WalFlusher            wf = null;
+        RecoveredWal          recovered = null;
+        try {
+            m  = new PluginMetrics();
+            lm = new LabelMapper(config, m);
+
+            String walPathStr = config.resolveWalPath();
+            Path walDir = Paths.get(walPathStr);
+            recovered = WalRecovery.recover(walDir, config.getWalFsync(), effectiveMaxPayload());
+            m.walReplaySamples(recovered.pendingSampleCount());
+
+            ww = WalWriter.resume(walDir, recovered.activeSegment(),
+                    config.getWalSegmentSizeBytes(),
+                    config.getWalMaxSizeBytes(),
+                    config.getWalOverflow(),
+                    config.getWalFsync(),
+                    effectiveMaxPayload());
+
+            wc = new RemoteWriteHttpClient(config);
+            rc = new PrometheusReadClient(config);
+            wf = new WalFlusher(walDir, ww, recovered.checkpoint(), effectiveMaxPayload(),
+                    wc, config.getBatchSize(), config.getFlushIntervalMs(), m);
+
+            Active built = new Active(lm, null, wc, rc, null, ww, wf,
+                    recovered.checkpoint(), walDir, m);
+            registerGauges(built);
+            logActivationOrDiff();
+            LOG.info("prometheus-remote-writer WAL active (path={}, pending={} samples, "
+                    + "disk={} bytes, checkpoint={})",
+                    walDir, recovered.pendingSampleCount(), recovered.totalBytesOnDisk(),
+                    recovered.checkpoint().lastSentOffset());
+            wf.start();
+            active = built;
+        } catch (IOException | RuntimeException e) {
+            rollbackStart(null, wf, wc, rc, ww);
+            if (e instanceof RuntimeException re) throw re;
+            throw new IllegalStateException("WAL startup failed", e);
+        }
+    }
+
+    /**
+     * Effective max payload in bytes for WAL frame decode — currently a
+     * static 1 MiB; chosen to comfortably exceed the largest plausible
+     * single-sample encoding (a few hundred bytes with a full label set)
+     * while rejecting obviously-absurd length prefixes from a corrupted
+     * segment.
+     */
+    private static int effectiveMaxPayload() {
+        return 1 << 20; // 1 MiB
     }
 
     public synchronized void stop() {
@@ -177,6 +278,20 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         active = null;
 
         LOG.info("prometheus-remote-writer stopping");
+        if (a.walEnabled()) {
+            stopWalMode(a);
+        } else {
+            stopQueueMode(a);
+        }
+        try { a.writeClient().shutdown(); } catch (RuntimeException e) { LOG.warn("write client shutdown: {}", e.getMessage(), e); }
+        try { a.readClient().shutdown();  } catch (RuntimeException e) { LOG.warn("read client shutdown: {}",  e.getMessage(), e); }
+
+        // Clear the static hot-reload diff anchor so a fresh start() after
+        // stop() logs "activated" rather than a spurious "reloaded".
+        LAST_ACTIVE.set(null);
+    }
+
+    private void stopQueueMode(Active a) {
         try {
             a.flusher().stop(config.getShutdownGracePeriodMs());
             int residual = a.queue().depth();
@@ -186,12 +301,35 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         } catch (RuntimeException e) {
             LOG.warn("error stopping flusher: {}", e.getMessage(), e);
         }
-        try { a.writeClient().shutdown(); } catch (RuntimeException e) { LOG.warn("write client shutdown: {}", e.getMessage(), e); }
-        try { a.readClient().shutdown();  } catch (RuntimeException e) { LOG.warn("read client shutdown: {}",  e.getMessage(), e); }
+    }
 
-        // Clear the static hot-reload diff anchor so a fresh start() after
-        // stop() logs "activated" rather than a spurious "reloaded".
-        LAST_ACTIVE.set(null);
+    private void stopWalMode(Active a) {
+        try {
+            // The grace period bounds the stop-thread's wait for the
+            // flusher loop to exit. WAL durability means unflushed
+            // samples are NOT lost — they replay on next start.
+            //
+            // Note: Thread.interrupt() does NOT cancel an in-flight
+            // OkHttp call. A POST stuck on a dead TCP connection will
+            // continue running until http.read-timeout-ms even after
+            // the grace window elapses; the writeClient.shutdown()
+            // below cancels the dispatcher to break out faster.
+            int pending = a.walFlusher().pendingSampleCount();
+            long checkpointAtStop = a.checkpoint().lastSentOffset();
+            a.walFlusher().stop(config.getShutdownGracePeriodMs());
+            if (pending > 0) {
+                LOG.info("WAL shutdown: {} sample(s) drained past checkpoint not yet "
+                        + "acknowledged; will replay from checkpoint offset {} on "
+                        + "next start", pending, checkpointAtStop);
+            }
+        } catch (RuntimeException e) {
+            LOG.warn("error stopping wal-flusher: {}", e.getMessage(), e);
+        }
+        try {
+            a.walWriter().close();
+        } catch (IOException | RuntimeException e) {
+            LOG.warn("error closing wal writer: {}", e.getMessage(), e);
+        }
     }
 
     // --- TimeSeriesStorage -------------------------------------------------
@@ -205,10 +343,66 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         }
         if (samples == null || samples.isEmpty()) return;
 
+        if (a.walEnabled()) {
+            storeToWal(a, samples);
+        } else {
+            storeToQueue(a, samples);
+        }
+    }
+
+    private void storeToQueue(Active a, List<Sample> samples) throws StorageException {
         for (Sample s : samples) {
             MappedSample mapped = a.labelMapper().map(s);
             if (mapped == null) continue;
             a.queue().enqueue(mapped);
+        }
+    }
+
+    private void storeToWal(Active a, List<Sample> samples) throws StorageException {
+        for (int i = 0; i < samples.size(); i++) {
+            Sample s = samples.get(i);
+            MappedSample mapped = a.labelMapper().map(s);
+            if (mapped == null) continue;
+            byte[] encoded = WalEntryCodec.encode(mapped);
+            try {
+                WalWriter.AppendResult r = a.walWriter().appendWithStats(encoded);
+                if (r.evictedFrames() > 0) {
+                    a.metrics().samplesDroppedWalFull(r.evictedFrames());
+                }
+                // Count what actually went to disk: 4-byte length + payload
+                // + 4-byte CRC = Frame.HEADER_BYTES + encoded.length.
+                a.metrics().walBytesWritten(org.opennms.plugins.prometheus.remotewriter.wal.Frame.HEADER_BYTES + encoded.length);
+            } catch (WalFullException full) {
+                // Bump the counter by the number of samples actually
+                // refused — this sample plus any later ones the caller
+                // had queued. Using `samples.size()` would double-count
+                // samples that already landed earlier in this batch and
+                // could over-count by an entire batch on a typical
+                // multi-sample store() call. The eviction count carried
+                // on the exception covers any frames already evicted
+                // BEFORE the giving-up throw (rare; only when a single
+                // frame exceeds the entire cap).
+                int refused = samples.size() - i;
+                a.metrics().samplesDroppedWalFull(
+                    (long) refused + full.evictedFramesBeforeFailure());
+                throw new StorageException(
+                    "WAL is full under backpressure policy (" + full.getMessage() + "); "
+                    + "increase wal.max-size-bytes, switch to wal.overflow=drop-oldest, "
+                    + "or resolve the downstream outage that is preventing drain",
+                    full);
+            } catch (IllegalStateException stateEx) {
+                // Triggered when start() partially rolled back, or when
+                // stop() snapped the writer between SPI snapshot of
+                // Active and the appendWithStats call. Wrap as
+                // StorageException so OpenNMS sees a typed error rather
+                // than an unchecked exception.
+                throw new StorageException(
+                    "WAL writer is not in an appendable state ("
+                    + stateEx.getMessage() + ") — plugin may be stopping or "
+                    + "in a recovered-but-failed state", stateEx);
+            } catch (IOException io) {
+                throw new StorageException("WAL append failed: " + io.getMessage(), io);
+            }
         }
     }
 
@@ -354,8 +548,6 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         // reading the correct collaborators even if stop() has cleared the
         // volatile `active`. The Active object itself stays alive as long as
         // the registry holds these gauges.
-        m.registerLongGauge(PluginMetrics.QUEUE_DEPTH,              () -> (long) a.queue().depth());
-        m.registerLongGauge(PluginMetrics.SAMPLES_DROPPED_QUEUE_FULL, a.queue()::getSamplesDroppedQueueFull);
         m.registerLongGauge(PluginMetrics.HTTP_BYTES_WRITTEN,       a.writeClient()::getBytesWritten);
         m.registerLongGauge(PluginMetrics.HTTP_WRITES_SUCCESSFUL,   a.writeClient()::getWritesSuccessful);
         m.registerLongGauge(PluginMetrics.HTTP_WRITES_FAILED,
@@ -365,11 +557,45 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         m.registerLongGauge(PluginMetrics.HTTP_IN_FLIGHT,           () -> (long) a.writeClient().getInFlightCalls());
         m.registerLongGauge(PluginMetrics.DELETE_NOOP,              this::getDeleteNoopTotal);
         m.registerLongGauge(PluginMetrics.METADATA_DENYLIST_BLOCKED, a.labelMapper()::getMetadataDenylistBlockedCount);
+
+        if (a.walEnabled()) {
+            registerWalGauges(a);
+        } else {
+            m.registerLongGauge(PluginMetrics.QUEUE_DEPTH,              () -> (long) a.queue().depth());
+            m.registerLongGauge(PluginMetrics.SAMPLES_DROPPED_QUEUE_FULL, a.queue()::getSamplesDroppedQueueFull);
+        }
     }
 
-    private static void rollbackStart(Flusher f, RemoteWriteHttpClient wc, PrometheusReadClient rc) {
+    private void registerWalGauges(Active a) {
+        PluginMetrics m = a.metrics();
+        Path walDir = a.walDir();
+        // wal_disk_usage_bytes: sum of .seg file sizes in the WAL
+        // directory. A dir scan per gauge-read; acceptable because the
+        // Karaf shell and Dropwizard registry only snapshot on demand.
+        m.registerLongGauge(PluginMetrics.WAL_DISK_USAGE_BYTES, () -> {
+            try { return a.walWriter().currentTotalBytes(); }
+            catch (IOException e) { return -1L; }
+        });
+        m.registerLongGauge(PluginMetrics.WAL_SEGMENTS_ACTIVE, () -> {
+            try (var stream = java.nio.file.Files.newDirectoryStream(
+                    walDir, "*" + WalSegment.SEG_EXT)) {
+                long count = 0;
+                for (@SuppressWarnings("unused") Path p : stream) count++;
+                return count;
+            } catch (IOException e) { return -1L; }
+        });
+    }
+
+    private static void rollbackStart(Flusher f, WalFlusher wf, RemoteWriteHttpClient wc,
+                                      PrometheusReadClient rc, WalWriter ww) {
         if (f != null) {
             try { f.stop(0); } catch (RuntimeException ignored) {}
+        }
+        if (wf != null) {
+            try { wf.stop(0); } catch (RuntimeException ignored) {}
+        }
+        if (ww != null) {
+            try { ww.close(); } catch (IOException | RuntimeException ignored) {}
         }
         if (wc != null) {
             try { wc.shutdown(); } catch (RuntimeException ignored) {}

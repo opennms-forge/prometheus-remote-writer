@@ -587,8 +587,105 @@ independent and can be combined with either.
 `store()` throws `StorageException` and OpenNMS sees the failure. If you hit
 this under normal load, the flusher isn't keeping up — raise
 `http.max-connections`, drop `flush.interval-ms`, raise `batch.size`, or look
-at backend ingest latency. v0.1 has no on-disk buffer; samples are lost if
-the backend is unavailable for longer than `queue.capacity / sample-rate`.
+at backend ingest latency. With `wal.enabled=false` (default), samples are
+lost if the backend is unavailable for longer than
+`queue.capacity / sample-rate`; enable the WAL (below) to make the plugin
+durable across restarts and extended outages.
+
+## Write-Ahead Log (durable buffering)
+
+Opt-in via `wal.enabled=true`. When enabled, every `store()` sample is
+appended to an on-disk Write-Ahead Log before the call returns, and the
+WAL replaces the in-memory `queue.capacity` buffer as source of truth.
+The `wal.fsync` policy controls when the OS flushes those bytes from
+the page cache to stable storage — the default `batch` fsyncs at each
+flush-interval boundary, which loses up to `flush.interval-ms` of
+samples on `kill -9` / kernel panic / power loss but matches typical
+remote-write RPO expectations. See the `wal.fsync` table row below.
+
+This gives the plugin two properties the v0.1 queue couldn't:
+
+- **Restart preservation** — samples queued before a graceful shutdown
+  replay to the endpoint on the next process start. Under the default
+  `batch` fsync, a `kill -9` may lose the last fsync window's worth
+  of samples; everything before that is durable.
+- **Extended outage buffering** — 5xx / transport failures never
+  advance the WAL checkpoint. The plugin retries from the same offset
+  on every flush cycle for as long as the endpoint stays down, up to
+  `wal.max-size-bytes` total footprint.
+
+### Configuration
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `wal.enabled` | `false` | Opt-in. When `false`, behavior is exactly v0.4. |
+| `wal.path` | `""` | Empty resolves to `${karaf.data}/prometheus-remote-writer/wal`. Set explicitly to redirect to a mounted volume or faster disk. |
+| `wal.max-size-bytes` | `536870912` (512 MB) | Total disk-footprint cap. Overflow policy fires when reached. |
+| `wal.segment-size-bytes` | `67108864` (64 MB) | Per-segment rotation threshold. Must be ≤ `wal.max-size-bytes`. |
+| `wal.fsync` | `batch` | `always` = fsync every append (tightest RPO); `batch` = fsync at each `flush.interval-ms` boundary (loses at most ~1 s on `kill -9`); `never` = OS page cache only (ephemeral deployments). |
+| `wal.overflow` | `backpressure` | `backpressure` = `store()` throws `StorageException` when cap reached (matches v0.4 queue-full); `drop-oldest` = evict the oldest segment to make room for new samples. |
+
+When `wal.enabled=true`:
+- `queue.capacity` is ignored (WARN logged at startup if explicitly set).
+- `shutdown.grace-period-ms` bounds the wait for the flusher loop to
+  exit cleanly — NOT a strict in-flight-HTTP deadline. Worker threads
+  blocked on a dead TCP connection may continue past the grace window
+  until `http.read-timeout-ms` (the HTTP client cancels them when the
+  shutdown sequence proceeds to `writeClient.shutdown()`). WAL
+  durability means nothing is lost at shutdown regardless of grace
+  value — anything pending replays on next start.
+
+### Operational notes
+
+- **Containerised Karaf**: if `${karaf.data}` is ephemeral, the default
+  `wal.path` evaporates across restart and the WAL is worse than useless.
+  Set `wal.path` explicitly to a mounted volume.
+- **Resetting the WAL**: `rm -rf ${wal.path}` while the plugin is
+  stopped. The plugin recreates the directory on next start.
+- **Fsync choice**: the `batch` default is the right choice for almost
+  everyone. Pick `always` only if you can justify the ~10× throughput
+  hit for tighter-than-1s RPO. Pick `never` only for ephemeral
+  deployments that accept losing in-flight data on kernel panic /
+  power loss.
+- **Overflow choice**: `backpressure` preserves v0.4 "operator sees the
+  failure" semantics and is the right default for alerting-driven
+  pipelines. Flip to `drop-oldest` when you care about recency over
+  history — dashboards showing "the last N hours" tolerate silent
+  eviction of the oldest samples better than a `store()` exception.
+
+### How it works, briefly
+
+```
+  store(samples)
+      ▼
+  LabelMapper.map()
+      ▼
+  WAL.append(MappedSample)   ◀── durable on disk
+      ▼
+  WalFlusher.pollBatch()  ──▶  HTTP POST  ──2xx──▶  Checkpoint.advance(offset)
+      │                                                 │
+      ▼ 4xx: advance checkpoint (match v0.4 drop)        ▼
+      ▼ 5xx exhausted / transport: leave checkpoint;     segments past the
+        re-read same batch next cycle                    checkpoint become
+                                                         eligible for deletion
+```
+
+Segment files are named by start offset (`00000000000000000000.seg`,
+`00000000000067108864.seg`, ...). Each segment has a companion `.idx`
+jsonl summary. `checkpoint.json` at the WAL root tracks the last
+offset confirmed shipped; written atomically (tmp + fsync + rename)
+on every advance.
+
+### When to leave it off
+
+- Single-node OpenNMS with a highly-available local backend on the
+  same box: disk I/O for samples that will definitely deliver is
+  overhead.
+- Short uptime / test environments where restart-preservation is not a
+  requirement.
+
+The default stays `wal.enabled=false` for this change. A later release
+may flip the default once the feature has soaked in real deployments.
 
 ## Self-metrics
 
