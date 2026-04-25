@@ -113,6 +113,9 @@ message Metadata {
     METRIC_TYPE_INFO = 6;
     METRIC_TYPE_STATESET = 7;
   }
+  // Field 2 was removed upstream — make the gap explicit so a future
+  // schema bump can't accidentally re-use it for a different concept.
+  reserved 2;
   MetricType type = 1;
   // Index into Request.symbols for the help text. 0 = empty string = unset.
   uint32 help_ref = 3;
