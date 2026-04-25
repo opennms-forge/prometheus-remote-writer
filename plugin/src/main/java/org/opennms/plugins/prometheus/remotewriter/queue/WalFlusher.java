@@ -95,8 +95,18 @@ public final class WalFlusher implements Closeable {
     private volatile int samplesDrainedSinceLastCheckpoint;
 
     /**
-     * Backwards-compatible constructor — defaults to v1 wire format.
-     * Used by tests that don't care about the wire-version branch.
+     * Test-only convenience constructor — hard-codes the v1 builder.
+     *
+     * <p><b>Do not use from production code.</b> The HTTP client selects
+     * v1/v2 headers from {@link
+     * org.opennms.plugins.prometheus.remotewriter.config.PrometheusRemoteWriterConfig#getWireProtocolVersion()};
+     * mixing this ctor with a {@code wire.protocol-version=2} config
+     * would emit v1-shaped bytes under v2 headers, which the backend
+     * rejects (or silently drops, on Prometheus 2.50–2.54). Production
+     * call sites must thread {@link
+     * RemoteWriteRequestBuilders#forVersion(int)
+     * RemoteWriteRequestBuilders.forVersion(config.getWireProtocolVersion())}
+     * into the explicit-builder constructor below.
      */
     public WalFlusher(Path walDir, WalWriter writer, Checkpoint checkpoint,
                       int maxPayload, RemoteWriteHttpClient httpClient,

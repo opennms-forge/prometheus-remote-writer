@@ -587,6 +587,7 @@ public class PrometheusRemoteWriterConfig {
         diffStr(out, "metadata.exclude",          other.metadataExclude,       metadataExclude);
         diffStr(out, "metadata.label-prefix",     other.metadataLabelPrefix,   metadataLabelPrefix);
         diffStr(out, "metadata.case",             other.metadataCase.name(),   metadataCase.name());
+        diffInt(out, "wire.protocol-version",     other.wireProtocolVersion,   wireProtocolVersion);
         return out;
     }
 

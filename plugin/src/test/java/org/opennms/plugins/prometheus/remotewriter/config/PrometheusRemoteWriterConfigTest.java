@@ -1053,6 +1053,15 @@ class PrometheusRemoteWriterConfigTest {
                 .isInstanceOf(IllegalStateException.class);
     }
 
+    @Test
+    void wire_protocol_version_is_reported_in_diff() {
+        PrometheusRemoteWriterConfig before = minimal();
+        PrometheusRemoteWriterConfig after  = minimal();
+        after.setWireProtocolVersion("2");
+        assertThat(after.diff(before))
+            .anyMatch(l -> l.startsWith("wire.protocol-version: 1 -> 2"));
+    }
+
     // ---------- helpers -----------------------------------------------------
 
     private static PrometheusRemoteWriterConfig minimal() {
