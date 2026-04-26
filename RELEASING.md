@@ -129,7 +129,7 @@ For a patch release (e.g. `v0.1.1`) on top of `v0.1.0`:
 A separate workflow,
 [`.github/workflows/publish-docs.yml`](.github/workflows/publish-docs.yml),
 publishes the rendered single-page HTML documentation to
-<https://opennms.github.io/prometheus-remote-writer/> whenever a GitHub
+<https://labmonkeys-space.github.io/prometheus-remote-writer/> whenever a GitHub
 Release is published. The site always reflects the most recent release
 tag — older versions are not retained as separate URLs in this release line.
 

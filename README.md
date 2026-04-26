@@ -1,6 +1,6 @@
 # OpenNMS Prometheus Remote Writer
 
-[![CI](https://github.com/OpenNMS/prometheus-remote-writer/actions/workflows/ci.yml/badge.svg)](https://github.com/OpenNMS/prometheus-remote-writer/actions/workflows/ci.yml)
+[![CI](https://github.com/labmonkeys-space/prometheus-remote-writer/actions/workflows/ci.yml/badge.svg)](https://github.com/labmonkeys-space/prometheus-remote-writer/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 An OpenNMS Horizon plugin that pushes performance data to any
@@ -11,7 +11,7 @@ categories, interface descriptors) as native Prometheus labels. Query
 your OpenNMS time-series data with PromQL directly from Grafana's
 Prometheus data source — no OpenNMS REST round-trip at query time.
 
-📖 **Documentation:** <https://opennms.github.io/prometheus-remote-writer/>
+📖 **Documentation:** <https://labmonkeys-space.github.io/prometheus-remote-writer/>
 
 ## Compatibility
 
@@ -25,7 +25,7 @@ Prometheus data source — no OpenNMS REST round-trip at query time.
 ```bash
 # 1. Drop the KAR into Karaf's deploy/ directory.
 curl -L -o /opt/opennms/deploy/prometheus-remote-writer.kar \
-    https://github.com/OpenNMS/prometheus-remote-writer/releases/latest/download/prometheus-remote-writer-kar.kar
+    https://github.com/labmonkeys-space/prometheus-remote-writer/releases/latest/download/prometheus-remote-writer-kar.kar
 
 # 2. Tell OpenNMS to use the integration TSS strategy.
 echo 'org.opennms.timeseries.strategy = integration' \
@@ -41,7 +41,7 @@ EOF
 #    opennms:prometheus-writer-stats
 ```
 
-The published [docs site](https://opennms.github.io/prometheus-remote-writer/)
+The published [docs site](https://labmonkeys-space.github.io/prometheus-remote-writer/)
 covers full configuration, wire-format selection (v1 / v2), the WAL,
 label mapping, backend compatibility, operations, and troubleshooting.
 
@@ -73,8 +73,8 @@ you suspect could be derivative.
 
 ## Links
 
-- 📖 [Docs site](https://opennms.github.io/prometheus-remote-writer/) — full operator reference
+- 📖 [Docs site](https://labmonkeys-space.github.io/prometheus-remote-writer/) — full operator reference
 - 📜 [`CHANGELOG.md`](CHANGELOG.md) — release history and unreleased changes
 - 🚀 [`RELEASING.md`](RELEASING.md) — how releases are cut and published
 - 🤖 [`CLAUDE.md`](CLAUDE.md) — project conventions for AI agents
-- 🐛 [Issue tracker](https://github.com/OpenNMS/prometheus-remote-writer/issues)
+- 🐛 [Issue tracker](https://github.com/labmonkeys-space/prometheus-remote-writer/issues)

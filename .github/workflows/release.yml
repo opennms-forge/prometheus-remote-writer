@@ -97,3 +97,15 @@ jobs:
               --generate-notes \
               "$KAR"
           fi
+
+      # The `release: published` event fired by `gh release create` runs
+      # under GITHUB_TOKEN, so by design GitHub Actions does NOT cascade
+      # it to other workflows. Manually dispatch publish-docs against
+      # the just-released tag — `workflow_dispatch` is allowed even
+      # when initiated by GITHUB_TOKEN.
+      - name: Trigger docs publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.resolve.outputs.tag }}"
+          gh workflow run publish-docs.yml --ref main -f tag="$TAG"

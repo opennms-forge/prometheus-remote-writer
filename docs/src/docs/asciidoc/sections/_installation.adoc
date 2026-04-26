@@ -26,7 +26,7 @@ Two install paths are available — pick whichever fits your deployment.
 # 1. Download the KAR from the GitHub Release matching your installed version.
 #    Example for v0.3.0:
 curl -L -o /opt/opennms/deploy/prometheus-remote-writer.kar \
-    https://github.com/OpenNMS/prometheus-remote-writer/releases/download/v0.3.0/prometheus-remote-writer-kar-0.3.0.kar
+    {project-repo-url}/releases/download/v{revnumber}/{project-artifact}-kar-{revnumber}.kar
 ----
 
 Karaf's `deploy` directory hot-installs `.kar` artifacts on drop. Confirm
