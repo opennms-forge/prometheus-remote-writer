@@ -10,7 +10,9 @@ the OpenNMS REST API at query time.
 
 ## Status
 
-**v0.1 — under development.** Targets OpenNMS Horizon 35 on Java 17.
+**v0.3 in preparation.** Latest release is **v0.2.0** (2026-04-25), which
+shipped the on-disk WAL. v0.3 adds operator-selectable Remote Write v2
+support (`wire.protocol-version`). Targets OpenNMS Horizon 35 on Java 17.
 
 ## Why this plugin exists
 
@@ -374,11 +376,10 @@ directly, and what the stack deliberately does not exercise.
 
 ## Quick start
 
-> Once v0.1 is released. Placeholder until then.
-
 ```bash
-# Install on a running OpenNMS Horizon 35 instance
-karaf@root()> feature:repo-add mvn:org.opennms.plugins/prometheus-remote-writer-features/0.1.0/xml/features
+# Install on a running OpenNMS Horizon 35 instance.
+# Substitute the version of the release you're installing.
+karaf@root()> feature:repo-add mvn:org.opennms.plugins/prometheus-remote-writer-features/0.2.0/xml/features
 karaf@root()> feature:install prometheus-remote-writer
 ```
 
@@ -515,12 +516,12 @@ labels.copy = foreign_source -> tenant
 labels.copy = node -> old_node_id
 ```
 
-> **Note:** `labels.copy = node -> instance` was a common v0.3 recipe. As of
-> v0.4 the plugin emits `instance` as a default (mirror of `node`), so the
-> directive is redundant — and would be rejected at startup because `instance`
-> is now a reserved target. If you don't want the `instance` label emitted,
-> opt out with `labels.exclude = instance` (or `labels.exclude = instance, job`
-> to opt out of both new v0.4 defaults).
+> **Note:** `labels.copy = node -> instance` was a common pre-0.2 recipe.
+> Since 0.2.0 the plugin emits `instance` as a default (mirror of `node`),
+> so the directive is redundant — and would be rejected at startup because
+> `instance` is now a reserved target. If you don't want the `instance`
+> label emitted, opt out with `labels.exclude = instance` (or
+> `labels.exclude = instance, job` to opt out of both 0.2.0 defaults).
 
 If you want the value under a new name AND you want to drop the original,
 use `labels.rename` — it does both in one directive. A `labels.copy` source
@@ -528,7 +529,7 @@ that doesn't exist at copy time (typo, or a label the plugin never emits on
 this deployment) produces a single startup `WARN` naming the unknown source;
 it does not block startup.
 
-**Cross-source filtering.** As of v0.4 the plugin emits `job` and `instance`
+**Cross-source filtering.** Since 0.2.0 the plugin emits `job` and `instance`
 as default labels so dashboards that compose OpenNMS data with node-exporter,
 OTel, or other Prometheus data sources in the same backend can use the
 standard idiom:
@@ -668,7 +669,7 @@ flush-interval boundary, which loses up to `flush.interval-ms` of
 samples on `kill -9` / kernel panic / power loss but matches typical
 remote-write RPO expectations. See the `wal.fsync` table row below.
 
-This gives the plugin two properties the v0.1 queue couldn't:
+This gives the plugin two properties the pre-WAL in-memory queue couldn't:
 
 - **Restart preservation** — samples queued before a graceful shutdown
   replay to the endpoint on the next process start. Under the default
@@ -683,12 +684,12 @@ This gives the plugin two properties the v0.1 queue couldn't:
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `wal.enabled` | `false` | Opt-in. When `false`, behavior is exactly v0.4. |
+| `wal.enabled` | `false` | Opt-in. When `false`, behavior matches the pre-0.2 in-memory `queue.capacity` path exactly. |
 | `wal.path` | `""` | Empty resolves to `${karaf.data}/prometheus-remote-writer/wal`. Set explicitly to redirect to a mounted volume or faster disk. |
 | `wal.max-size-bytes` | `536870912` (512 MB) | Total disk-footprint cap. Overflow policy fires when reached. |
 | `wal.segment-size-bytes` | `67108864` (64 MB) | Per-segment rotation threshold. Must be ≤ `wal.max-size-bytes`. |
 | `wal.fsync` | `batch` | `always` = fsync every append (tightest RPO); `batch` = fsync at each `flush.interval-ms` boundary (loses at most ~1 s on `kill -9`); `never` = OS page cache only (ephemeral deployments). |
-| `wal.overflow` | `backpressure` | `backpressure` = `store()` throws `StorageException` when cap reached (matches v0.4 queue-full); `drop-oldest` = evict the oldest segment to make room for new samples. |
+| `wal.overflow` | `backpressure` | `backpressure` = `store()` throws `StorageException` when cap reached (matches the pre-0.2 queue-full semantic); `drop-oldest` = evict the oldest segment to make room for new samples. |
 
 When `wal.enabled=true`:
 - `queue.capacity` is ignored (WARN logged at startup if explicitly set).
@@ -712,8 +713,8 @@ When `wal.enabled=true`:
   hit for tighter-than-1s RPO. Pick `never` only for ephemeral
   deployments that accept losing in-flight data on kernel panic /
   power loss.
-- **Overflow choice**: `backpressure` preserves v0.4 "operator sees the
-  failure" semantics and is the right default for alerting-driven
+- **Overflow choice**: `backpressure` preserves the pre-0.2 "operator sees
+  the failure" semantic and is the right default for alerting-driven
   pipelines. Flip to `drop-oldest` when you care about recency over
   history — dashboards showing "the last N hours" tolerate silent
   eviction of the oldest samples better than a `store()` exception.
@@ -729,7 +730,7 @@ When `wal.enabled=true`:
       ▼
   WalFlusher.pollBatch()  ──▶  HTTP POST  ──2xx──▶  Checkpoint.advance(offset)
       │                                                 │
-      ▼ 4xx: advance checkpoint (match v0.4 drop)        ▼
+      ▼ 4xx: advance checkpoint (matches pre-WAL drop)   ▼
       ▼ 5xx exhausted / transport: leave checkpoint;     segments past the
         re-read same batch next cycle                    checkpoint become
                                                          eligible for deletion
@@ -774,50 +775,59 @@ Exposed via a Dropwizard registry and printed by the Karaf shell command
 
 ## Backend compatibility
 
-Targets the [Prometheus Remote Write v1](https://prometheus.io/docs/specs/prw/remote_write_spec/)
-protocol. Tested against (planned, end of v0.1 cycle):
+Supports both
+[Prometheus Remote Write v1](https://prometheus.io/docs/specs/prw/remote_write_spec/)
+and v2 wire formats — operator-selectable via `wire.protocol-version`
+(default `1`, no behavior change for existing deployments). See the
+[Wire format](#wire-format-v1--v2) section above for the per-version
+header / payload differences and backend-version requirements.
 
-- Prometheus
-- Grafana Mimir
-- VictoriaMetrics
-- Cortex
-- Thanos Receive
+Exercised end-to-end in CI:
 
-Remote Write v2, native histograms, exemplars, and mTLS client certificates are
-deferred to future releases.
+| Backend | v1 (Prom 2.53.2 reference) | v2 (Prom 3.0.1 reference) |
+|---|---|---|
+| Prometheus | ✅ Testcontainers IT | ✅ Testcontainers IT |
+| Grafana Mimir | ✅ e2e smoke (`make smoke BACKENDS=mimir`) | ✅ via `wire.protocol-version=2` |
+| VictoriaMetrics | ✅ e2e smoke (`make smoke BACKENDS=victoriametrics`) | ✅ with v2 ingest enabled |
+| Cortex | Compatible — not in CI matrix | Compatible — not in CI matrix |
+| Thanos Receive | Compatible — not in CI matrix | Compatible — not in CI matrix |
 
-## Non-goals for v0.1
+Native histograms, exemplars, per-series metadata, and mTLS client
+certificates are deferred — see "Out of scope" below for the rationale.
 
-These are deliberate omissions, not missing features. Each has a path to a
-later release if demand materializes.
+## Out of scope (current)
 
-- **Remote Write v2** — v1 is universally supported; v2 is stable since
-  Prometheus 2.50 but not yet universally deployed across backends. Tracked
-  for v0.2.
-- **Native histograms and exemplars** — deferred to v0.2; OpenNMS doesn't
-  currently surface histogram data through the TSS SPI.
-- **mTLS client certificates** — Basic, Bearer, and tenant-id header cover
-  the common cases in v0.1. Client-cert auth is a v0.2 candidate.
-- **Durable on-disk write buffer (WAL)** — v0.1 uses a bounded in-memory
-  queue and drops on overflow. Samples are lost on process restart or
-  extended backend outage. Operators are expected to alert on
-  `samples_dropped_queue_full_total`. A WAL is tracked for v0.2.
-- **Per-tenant routing or multi-destination fan-out** — one write URL, one
-  tenant ID per plugin instance. For multi-destination, run multiple OpenNMS
-  instances or wait for the fan-out work.
-- **Migration tooling from `opennms-cortex-tss-plugin`** — not in scope for
-  v0.1. Likely shape: stand both plugins up, dual-write for a period, switch
-  queries once the new labels are established, uninstall cortex-tss. No
-  in-product tooling.
+Deliberate omissions in the current line. Each has a path to a later
+release if demand materializes; what shipped along the way is recorded
+in `CHANGELOG.md`.
+
+- **Native histograms and exemplars** — the v2 wire layer reserves the
+  fields, but the plugin doesn't populate them. OpenNMS doesn't surface
+  histogram data through the TSS SPI today, and there's no trace-ID
+  source for exemplars on the OpenNMS side. Out-of-scope, not blocked
+  by the wire format.
+- **Per-series metadata** (`help`, `unit`, `created_timestamp`) — same
+  reasoning as histograms: v2 reserves the fields; no source-side
+  population today.
+- **mTLS client certificates** — Basic, Bearer, and tenant-id header
+  cover the common deployment shapes. Client-cert auth is a candidate
+  for a future release if demand materializes.
+- **Per-tenant routing / multi-destination fan-out** — one `write.url`
+  and one `tenant.org-id` per plugin instance. For multi-destination,
+  run multiple OpenNMS instances; an in-process fan-out remains a
+  future-release candidate.
+- **Migration tooling from `opennms-cortex-tss-plugin`** — not in
+  scope. Recommended migration shape: stand both plugins up, dual-write
+  for a period, switch queries once the new labels are established,
+  uninstall cortex-tss. No in-product tooling.
 - **Per-series `delete()`** — Prometheus Remote Write has no delete
   semantic. `delete(Metric)` is a no-op that logs a rate-limited WARN.
   Configure retention at the backend tier (Prometheus
   `--storage.tsdb.retention`, Mimir/VictoriaMetrics compactor).
 - **Full OpenNMS TSS compliance-suite pass** — the compliance suite's
   `shouldDeleteMetrics` and whole-`Metric` partition-equality assertions
-  conflict with our design. See the design doc §6 and §7 for rationale;
-  `PrometheusComplianceIT` skips the conflicting tests with documented
-  `@Ignore` reasons.
+  conflict with our design. `PrometheusComplianceIT` skips the
+  conflicting tests with documented `@Ignore` reasons.
 
 ## Contributing
 
