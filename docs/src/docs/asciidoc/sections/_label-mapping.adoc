@@ -1,0 +1,328 @@
+[#label-mapping]
+= Labels and enrichment
+
+== Default label set
+
+For every sample, the plugin emits the following Prometheus labels when
+the corresponding source data is available:
+
+[cols="1,2,3",options="header"]
+|===
+| Label                  | Source                                  | Notes
+
+| `onms_instance_id`     | config `instance.id`                    | Only emitted when `instance.id` is set.
+| `job`                  | derived from `resourceId` shape, or config `job.name` override
+                                                                   | `"snmp"` for SNMP-collected data, `"jmx"` for slash-FS `jmx-*` / `opennms-jvm` groups, `"opennms"` catch-all for unparseable shapes.
+| `__name__`             | intrinsic `name`                        | Sanitized to Prom's metric-name grammar.
+| `resourceId`           | intrinsic `resourceId`                  | Raw, lossless.
+| `node`                 | derived                                  | `"<foreignSource>:<foreignId>"` when both are set; numeric dbId otherwise.
+| `instance`             | same value as `node`                    | Prom-idiomatic subject-identity label for mixed-backend filtering. Emitted iff `node` is emitted.
+| `node_label`           | external `nodeLabel`                    | Human-readable. Mutable — disable via config if churn is a concern.
+| `foreign_source`       | external                                | Stable.
+| `foreign_id`           | external                                | Stable.
+| `location`             | external                                | OpenNMS monitoring location.
+| `resource_type`        | parsed from `resourceId`                | e.g. `interfaceSnmp`, `hrStorageIndex`, `nodeSnmp`.
+| `resource_instance`    | parsed from `resourceId`                | e.g. `en0`, `1`, or empty for node-level.
+| `if_name`              | external `ifName`                       |
+| `if_descr`             | external `ifDescr`                      |
+| `if_speed`             | derived                                 | Bits-per-second: `ifHighSpeed × 1_000_000` when non-zero, else `ifSpeed`.
+| `onms_cat_<name>`      | surveillance categories                 | One label per category, value `"true"`.
+|===
+
+*Deliberately excluded by default* — available via `labels.include` if
+you want them: `if_alias` (user-editable, churns), `sys_descr`,
+`sys_object_id`, asset-record fields, OpenNMS metadata (see
+<<configuration>> for the metadata gating rules).
+
+== Label enrichment is two-sided
+
+The default label allowlist is the *write-side* policy: it decides which
+OpenNMS-attached tags become Prometheus labels. The *read-side* —
+OpenNMS attaching those tags to samples in the first place — lives in
+OpenNMS itself, and it is off by default.
+
+[.text-center]
+....
+OpenNMS metatags config ─▶ MATE interpolation ─▶ sample tags ─▶ plugin label mapping ─▶ Prometheus labels
+   (read-side, you)           (OpenNMS core)       (per Sample)      (this plugin)          (on the wire)
+....
+
+OpenNMS's `MetaTagDataLoader` runs each configured value template through
+the MATE interpolator against the sample's scope and attaches a tag for
+every non-empty result. The property names below and the MATE scope
+syntax (`${node:…}`, `${interface:…}`, `${service:…}`, `${asset:…}`) are
+as of OpenNMS Horizon 35; upstream changes may rename properties in
+future Horizon releases. *If you don't configure any
+`org.opennms.timeseries.tin.metatags.tag.*` properties, samples arrive at
+this plugin carrying only `name` and `resourceId`* — and your Prometheus
+series will have bare `{resourceId="…"}` labels regardless of what this
+plugin is configured to emit.
+
+=== Minimal metatag config
+
+Put these four lines in `etc/opennms.properties.d/metatags.properties`
+to enable node identity labels:
+
+[source,properties]
+----
+org.opennms.timeseries.tin.metatags.tag.nodeLabel     = ${node:label}
+org.opennms.timeseries.tin.metatags.tag.foreignSource = ${node:foreign-source}
+org.opennms.timeseries.tin.metatags.tag.foreignId     = ${node:foreign-id}
+org.opennms.timeseries.tin.metatags.tag.location      = ${node:location}
+----
+
+After OpenNMS reloads, samples carry those four tags. The plugin's
+default allowlist maps them to `node_label`, `foreign_source`,
+`foreign_id`, and `location`, and derives `node="<fs>:<fid>"` from the
+pair. For interface descriptors:
+
+[source,properties]
+----
+org.opennms.timeseries.tin.metatags.tag.ifName  = ${interface:if-name}
+org.opennms.timeseries.tin.metatags.tag.ifDescr = ${interface:if-description}
+----
+
+=== Surveillance categories
+
+Categories are a separate opt-in on the OpenNMS side:
+
+[source,properties]
+----
+org.opennms.timeseries.tin.metatags.exposeCategories = true
+----
+
+Setting this causes OpenNMS to attach a `categories` sample tag
+(comma-separated list of surveillance-category names). The plugin's
+default allowlist already expands that single tag into one
+`onms_cat_<sanitized-name>` label per value — no additional plugin
+config needed.
+
+[NOTE]
+.The node record must exist in OpenNMS
+====
+`MetaTagDataLoader` resolves node-scope properties by looking up the node
+via its foreign-source/foreign-id pair or its numeric dbId. If the node
+record doesn't exist — typically a requisition that was deleted, or an
+`fs:fid` that never got imported — no interpolation happens and the
+sample arrives with only `name` and `resourceId`. You'll see empty
+enrichment labels, not garbage labels: verify the node exists in
+OpenNMS before debugging the plugin.
+====
+
+== Identifying samples from multiple OpenNMS instances
+
+Running more than one OpenNMS instance against the same
+Prometheus-compatible backend? Two independent knobs exist, and they
+solve different problems:
+
+[cols="1,2,4,3",options="header"]
+|===
+| Knob                   | Header / label             | What it does                                                                                                                                                          | Works with
+
+| `instance.id`          | label `onms_instance_id`   | Stamps every sample with a stable per-instance identifier. PromQL can filter (`{onms_instance_id="…"}`) or aggregate (`sum by (onms_instance_id) (…)`) across all instances in the shared backend. | Every Prometheus-compatible backend.
+
+| `tenant.org-id`        | header `X-Scope-OrgID`     | Partitions storage at the backend tier — each tenant's data is isolated, queried separately. | Mimir, Cortex, VictoriaMetrics cluster, Thanos Receive. *No-op* against plain Prometheus and single-tenant VictoriaMetrics.
+|===
+
+=== When to use which
+
+[cols="3,1,1",options="header"]
+|===
+| Deployment                                                              | `instance.id` | `tenant.org-id`
+
+| Single OpenNMS → dedicated backend                                      | not required  | not required
+| Multiple OpenNMS → shared Prometheus / single-tenant VictoriaMetrics    | *required*    | n/a (no-op)
+| Multiple OpenNMS → Mimir / Cortex / VM cluster, fleet-wide queries      | *required*    | optional
+| Multiple OpenNMS → Mimir / Cortex / VM cluster, strict per-instance isolation | optional | *required*
+|===
+
+If you want both fleet-wide PromQL *and* backend-enforced isolation, set
+both.
+
+=== Example
+
+Two OpenNMS instances writing to the same Mimir cluster:
+
+[source,properties]
+----
+# opennms.properties.d on instance #1
+instance.id    = opennms-us-east
+tenant.org-id  = fleet-prod
+
+# opennms.properties.d on instance #2
+instance.id    = opennms-us-west
+tenant.org-id  = fleet-prod
+----
+
+PromQL:
+
+[source]
+----
+# All nodes, either OpenNMS
+up{job="opennms"}
+
+# Per-OpenNMS rollup
+sum by (onms_instance_id) (rate(ifHCInOctets[5m]))
+
+# Just the west instance
+ifHCInOctets{onms_instance_id="opennms-us-west"}
+----
+
+== Label pipeline — rename vs. copy vs. exclude
+
+Both `labels.rename` and `labels.copy` produce a label under a new name,
+but the mental model differs:
+
+* *`labels.rename`* changes a label's name. The original disappears.
+* *`labels.copy`* adds a second name for a label. Both names remain
+  present with the same value.
+
+They run in a fixed pipeline:
+
+[.text-center]
+....
+defaults  →  exclude  →  include  →  copy  →  rename  →  metadata
+....
+
+Copy is one-pass (sees labels that exist at its stage entry; does not
+recurse) and operates on pre-rename names. Reserved-target rules apply
+symmetrically to both — a `to` value that collides with a default label
+name, a reserved prefix (`onms_cat_*`, `onms_meta_*`), another rename
+target, or another copy target is rejected at startup with an actionable
+error.
+
+=== Common `labels.copy` recipes
+
+[source,properties]
+----
+# Multi-tenant Mimir — emit `tenant` as a copy of `foreign_source` so
+# per-requisition dashboards and the backend's tenant-id convention
+# both key off the same value.
+labels.copy = foreign_source -> tenant
+
+# Migration-period dual emission — when changing a label name, copy the
+# old name onto the new one for a release cycle so dashboards and alert
+# rules can migrate gradually. Drop the copy once the rename lands.
+labels.copy = node -> old_node_id
+----
+
+[NOTE]
+.`labels.copy = node -> instance` is now redundant
+====
+Pre-0.2 deployments often copied `node` onto `instance`. Since 0.2.0 the
+plugin emits `instance` as a default (mirror of `node`), so the
+directive is redundant — and would be rejected at startup because
+`instance` is now a reserved target. If you don't want the `instance`
+label emitted, opt out with `labels.exclude = instance`.
+====
+
+If you want the value under a new name AND you want to drop the
+original, use `labels.rename` — it does both in one directive. A
+`labels.copy` source that doesn't exist at copy time (typo, or a label
+the plugin never emits on this deployment) produces a single startup
+WARN naming the unknown source; it does not block startup.
+
+== Cross-source filtering with `job` and `instance`
+
+Since 0.2.0 the plugin emits `job` and `instance` as default labels so
+dashboards that compose OpenNMS data with node-exporter, OTel, or other
+Prometheus data sources in the same backend can use the standard idiom:
+
+[source,promql]
+----
+# All OpenNMS-SNMP interface traffic for a specific node
+{job="snmp", instance="NOC:router-42", __name__="ifHCInOctets"}
+
+# Scope across data sources: everything about a host
+{instance=~"NOC:router-42|10.0.0.1:9100"}
+
+# Or by data source type
+{job=~"snmp|node-exporter"}
+----
+
+The plugin's `instance` value carries the OpenNMS-managed device
+identity (`<foreignSource>:<foreignId>` when requisitioned, or the
+numeric dbId), whereas node-exporter emits `instance="<host>:<port>"` —
+same label name, different value shapes for the same physical device.
+Cross-source value correlation (same label value across sources for the
+same device) requires backend `relabel_config`; the shared label *name*
+alone doesn't bridge value shapes. `job` is the primary cross-source
+scoping filter.
+
+The `job` value is derived from each sample's `resourceId` pattern:
+
+* bracketed and slash-path SNMP-originated data → `snmp`
+* `snmp/fs/…/jmx-*` or `opennms-jvm` groups (prefix match on the literal
+  `jmx-`, not a shell glob) → `jmx`
+* unparseable shapes → `opennms` catch-all
+
+Set `job.name = <constant>` in the cfg to override the derivation with a
+fleet-wide constant value (useful when you want every sample from one
+plugin instance under the same job, e.g., `job.name = opennms-prod`).
+
+[NOTE]
+.The `opennms` catch-all
+====
+Samples whose `resourceId` isn't recognised by any of the three grammars
+fall through to `job="opennms"` as the default. Samples from distinct
+upstream sources that share the same metric name and land in this
+catch-all *will* collide into a single time series (same `{__name__,
+job="opennms"}` identity, no distinguishing labels). If you see an
+unexpectedly high proportion of samples with `job="opennms"` in your
+backend, treat it as a signal that the parser is missing a real-world
+resourceId shape — open an issue with the offending string. The
+`samples_unparseable_resource_id_total` counter tracks this rate.
+====
+
+== Reserved rename / copy targets
+
+The plugin rejects `labels.rename` and `labels.copy` entries whose
+*target* would silently clobber an already-emitted label. Reserved
+targets:
+
+[cols="1,3,3",options="header"]
+|===
+| Kind   | Value                                                | Why
+
+| Exact  | `__name__`                                            | Prometheus metric name.
+| Exact  | `resourceId`                                          | OpenNMS resource identifier (raw, lossless).
+| Exact  | `node`                                                | Derived FS-qualified or numeric node id.
+| Exact  | `foreign_source`, `foreign_id`                        | Requisition identity.
+| Exact  | `node_label`                                          | Node's human-readable name.
+| Exact  | `location`                                            | OpenNMS monitoring location.
+| Exact  | `resource_type`, `resource_instance`                  | Parsed from `resourceId`.
+| Exact  | `if_name`, `if_descr`, `if_speed`                     | SNMP interface descriptors.
+| Exact  | `job`, `instance`                                     | Default labels (since 0.2.0).
+| Exact  | `onms_instance_id`                                    | Multi-instance origin stamp (reserved even when `instance.id` is unset).
+| Prefix | `onms_cat_*`                                          | Per-surveillance-category expansion.
+| Prefix | `onms_meta_*`                                         | Default metadata-passthrough prefix.
+|===
+
+Duplicate rename targets (`foo -> cluster, bar -> cluster`) and
+duplicate `from` keys (`a -> cluster, a -> tenant`) are also rejected.
+When multiple rename or copy entries have errors, the plugin reports all
+of them in one startup error so you fix once and restart once.
+
+[WARNING]
+.`onms_meta_*` reservation covers only the default prefix
+====
+The `onms_meta_*` prefix reservation covers only the plugin's *default*
+metadata prefix. If you set `metadata.label-prefix` to something other
+than `onms_meta_`, rename / copy targets that collide with the
+customized prefix are *not* caught by startup validation; pick
+non-colliding targets by inspection. The default prefix is what the
+vast majority of deployments use.
+====
+
+== Sanitization rules
+
+The plugin sanitizes every metric name, label name, and label value to
+conform to the Prometheus text model before serialization:
+
+* Metric names: characters outside `[a-zA-Z0-9_:]` replaced with `_`;
+  leading digit replaced with `_`.
+* Label names: characters outside `[a-zA-Z0-9_]` replaced with `_`;
+  leading digit replaced with `_`.
+* Label values: truncated to the first 2048 bytes if longer.
+* `NaN`, `+Infinity`, `-Infinity` sample values are dropped before
+  serialization (`samples_dropped_nonfinite_total` increments).

@@ -7,6 +7,7 @@
 #   make verify       Run unit + integration tests (requires Docker for IT)
 #   make kar          Build the KAR (assembly/kar/target/*.kar)
 #   make smoke        Build KAR and run e2e smoke test against all backends
+#   make docs         Render single-page HTML documentation
 #   make clean        Remove all build artifacts
 #
 # Overridable variables:
@@ -25,7 +26,7 @@ MVN := ./mvnw
 
 export MAVEN_OPTS
 
-.PHONY: help build test verify kar smoke clean test-class
+.PHONY: help build test verify kar smoke docs clean test-class
 
 .DEFAULT_GOAL := help
 
@@ -52,6 +53,10 @@ kar: ## Build the KAR artifact
 
 smoke: kar ## Run e2e smoke test (BACKENDS, TIMEOUT overrides accepted)
 	cd e2e && ./smoke.sh $(BACKENDS)
+
+docs: ## Render single-page HTML documentation to docs/target/generated-docs
+	$(MVN) $(MAVEN_FLAGS) -pl :prometheus-remote-writer-docs -am -DskipTests \
+	  org.asciidoctor:asciidoctor-maven-plugin:process-asciidoc
 
 clean: ## Remove all build artifacts
 	$(MVN) $(MAVEN_FLAGS) clean

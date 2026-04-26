@@ -124,6 +124,37 @@ For a patch release (e.g. `v0.1.1`) on top of `v0.1.0`:
 | `prometheus-remote-writer-<version>.jar` (bundle) | Not auto-published in v0.1 | Planned once the repo moves under the OpenNMS namespace and a Maven repo target is chosen |
 | `prometheus-remote-writer-features-<version>-features.xml` | Not auto-published in v0.1 | Same as above — consumed via `feature:repo-add mvn:…/xml/features` when a Maven repo is available |
 
+## Docs site (GitHub Pages)
+
+A separate workflow,
+[`.github/workflows/publish-docs.yml`](.github/workflows/publish-docs.yml),
+publishes the rendered single-page HTML documentation to
+<https://opennms.github.io/prometheus-remote-writer/> whenever a GitHub
+Release is published. The site always reflects the most recent release
+tag — older versions are not retained as separate URLs in this release line.
+
+### One-time repo setup
+
+Before the first publish workflow run, enable Pages in the repository:
+
+- **Settings → Pages → Build and deployment → Source: GitHub Actions.**
+
+The workflow needs `pages: write` and `id-token: write`, which are already
+declared at workflow scope. No `gh-pages` branch is used.
+
+### Manual republish
+
+If a release ships with a docs typo, fix it on `main` and re-run the
+workflow against the same tag — the published site updates without
+cutting a new release:
+
+```bash
+gh workflow run publish-docs.yml -f tag=v0.3.0
+```
+
+The `release: published` trigger fires once per release; `workflow_dispatch`
+is for these out-of-band republishes.
+
 ## Deferred to a later release
 
 - **Maven artifact publication** — required for the Karaf

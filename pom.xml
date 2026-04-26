@@ -28,6 +28,7 @@
         <module>plugin</module>
         <module>karaf-features</module>
         <module>assembly/kar</module>
+        <module>docs</module>
     </modules>
 
     <properties>
@@ -70,6 +71,7 @@
         <karaf-maven-plugin.version>4.4.10</karaf-maven-plugin.version>
         <protobuf-maven-plugin.version>0.6.1</protobuf-maven-plugin.version>
         <os-maven-plugin.version>1.7.1</os-maven-plugin.version>
+        <asciidoctor-maven-plugin.version>3.2.0</asciidoctor-maven-plugin.version>
     </properties>
 
     <dependencyManagement>
@@ -226,6 +228,11 @@
                     <groupId>org.xolstice.maven.plugins</groupId>
                     <artifactId>protobuf-maven-plugin</artifactId>
                     <version>${protobuf-maven-plugin.version}</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.asciidoctor</groupId>
+                    <artifactId>asciidoctor-maven-plugin</artifactId>
+                    <version>${asciidoctor-maven-plugin.version}</version>
                 </plugin>
             </plugins>
         </pluginManagement>

@@ -1,0 +1,40 @@
+= OpenNMS Prometheus Remote Writer · v{revnumber}
+:author: The OpenNMS Group, Inc. — Incubation project
+
+include::_attributes.adoc[]
+
+[.lead]
+An OpenNMS Horizon plugin that pushes performance data to any
+Prometheus-compatible Remote Write endpoint — Prometheus, Cortex, Grafana
+Mimir, VictoriaMetrics, Thanos Receive — and surfaces OpenNMS resource
+context as native Prometheus labels.
+
+[IMPORTANT]
+.Incubation project — community support only
+====
+This is an **incubation project** of The OpenNMS Group, Inc. Community
+support is available at https://opennms.discourse.group/[opennms.discourse.group].
+**No commercial support is available yet.**
+====
+
+NOTE: This site documents version *{revnumber}*, built on *{revdate}*. For
+the source repository and issue tracker, see
+{project-repo-url}[github.com/OpenNMS/{project-artifact}].
+
+include::sections/_overview.adoc[leveloffset=+1]
+
+include::sections/_installation.adoc[leveloffset=+1]
+
+include::sections/_configuration.adoc[leveloffset=+1]
+
+include::sections/_wire-protocols.adoc[leveloffset=+1]
+
+include::sections/_wal.adoc[leveloffset=+1]
+
+include::sections/_label-mapping.adoc[leveloffset=+1]
+
+include::sections/_backends.adoc[leveloffset=+1]
+
+include::sections/_operations.adoc[leveloffset=+1]
+
+include::sections/_troubleshooting.adoc[leveloffset=+1]
