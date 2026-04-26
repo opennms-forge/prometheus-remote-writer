@@ -12,14 +12,10 @@ context as native Prometheus labels.
 [IMPORTANT]
 .Incubation project — community support only
 ====
-This is an **incubation project** of The OpenNMS Group, Inc. Community
-support is available at https://opennms.discourse.group/[opennms.discourse.group].
+This is an **incubation project** of the OpenNMS Community.
+Support is available at https://opennms.discourse.group/[opennms.discourse.group].
 **No commercial support is available yet.**
 ====
-
-NOTE: This site documents version *{revnumber}*, built on *{revdate}*. For
-the source repository and issue tracker, see
-{project-repo-url}[github.com/OpenNMS/{project-artifact}].
 
 include::sections/_overview.adoc[leveloffset=+1]
 
