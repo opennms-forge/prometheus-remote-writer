@@ -7,6 +7,8 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-04-26
+
 ### Added
 
 - **`wire.protocol-version` configuration key** — operator-selectable
@@ -56,6 +58,28 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 These are not breaking decisions; future changes can populate any of
 the v2 fields without modifying the wire layer added here.
+
+### Tests
+
+- **WAL + Remote Write v2 integration tests** — new
+  `PrometheusRemoteWriteWalV2IT` covers two scenarios that close the
+  bottom-right corner of the IT matrix: WAL-buffered samples replayed
+  under v2 after a restart, and samples written under
+  `wire.protocol-version=1` then replayed under
+  `wire.protocol-version=2` (pinning the wire-version-agnostic-WAL
+  invariant end-to-end against `prom/prometheus:v3.0.1`).
+- **v1 vs v2 dedup-parity unit test** — `RemoteWriteV1V2DedupParityTest`
+  pins identical drop counts and surviving-sample shapes across the two
+  builders for duplicate-timestamp dedup, non-finite filter, and
+  per-series isolation. Catches future divergence loudly.
+
+### Fixed
+
+- **`Metadata` proto upstream parity** — added `reserved 2;` to the v2
+  `Metadata` message to match the upstream `io.prometheus.write.v2.Request`
+  schema. Operationally low-impact (the field number was already
+  unused) but prevents a future schema bump from silently re-using it
+  for a different concept.
 
 ## [0.2.0] — 2026-04-25
 
@@ -514,8 +538,7 @@ Go sanitization rules.
 - Karaf feature `prometheus-remote-writer` shipping a pre-populated
   `etc/org.opennms.plugins.tss.prometheusremotewriter.cfg` on install.
 
-[Unreleased]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.4.0...HEAD
-[0.4.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.3.0...v0.4.0
+[Unreleased]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.3.0...HEAD
 [0.3.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/releases/tag/v0.1.0
