@@ -12,6 +12,9 @@ on:
 
 permissions:
   contents: write
+  # Needed by the final "Trigger docs publish" step, which dispatches
+  # publish-docs.yml via `gh workflow run` after the release is created.
+  actions: write
 
 jobs:
   release:
