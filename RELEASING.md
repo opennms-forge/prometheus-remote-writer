@@ -73,7 +73,7 @@ Pushing the tag triggers `.github/workflows/release.yml`:
 Watch the run:
 
 ```bash
-gh run watch --repo labmonkeys-space/prometheus-remote-writer
+gh run watch --repo opennms-forge/prometheus-remote-writer
 ```
 
 ### 3. Post-release
@@ -129,7 +129,7 @@ For a patch release (e.g. `v0.1.1`) on top of `v0.1.0`:
 A separate workflow,
 [`.github/workflows/publish-docs.yml`](.github/workflows/publish-docs.yml),
 publishes the rendered single-page HTML documentation to
-<https://labmonkeys-space.github.io/prometheus-remote-writer/> whenever a GitHub
+<https://opennms-forge.github.io/prometheus-remote-writer/> whenever a GitHub
 Release is published. The site always reflects the most recent release
 tag — older versions are not retained as separate URLs in this release line.
 
@@ -158,8 +158,9 @@ is for these out-of-band republishes.
 ## Deferred to a later release
 
 - **Maven artifact publication** — required for the Karaf
-  `feature:repo-add mvn:…` install flow shown in the README. Pending the
-  repo's migration under the OpenNMS namespace and a Maven-repo target
-  decision (Central via Sonatype, GitHub Packages, or a private Nexus).
+  `feature:repo-add mvn:…` install flow shown in the README. The repo
+  now lives under the `opennms-forge` namespace; remaining decision is
+  the Maven-repo target (Central via Sonatype, GitHub Packages, or a
+  private Nexus).
 - **Release signing** — GPG-signed tags and signed Maven artifacts.
 - **Provenance attestation** — SLSA-style build provenance is a v0.2+ goal.
