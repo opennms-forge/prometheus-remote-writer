@@ -24,6 +24,23 @@
         </license>
     </licenses>
 
+    <developers>
+        <developer>
+            <id>indigo423</id>
+            <name>Ronny Trommer</name>
+            <email>ronny@opennms.com</email>
+            <organization>The OpenNMS Group, Inc.</organization>
+            <organizationUrl>https://www.opennms.com</organizationUrl>
+            <roles>
+                <role>creator</role>
+                <role>maintainer</role>
+            </roles>
+            <properties>
+                <alt-email>ronny@no42.org</alt-email>
+            </properties>
+        </developer>
+    </developers>
+
     <modules>
         <module>plugin</module>
         <module>karaf-features</module>
