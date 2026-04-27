@@ -25,9 +25,9 @@ the release artifacts (in CI from secrets `PRW_GPG_PRIVATE_KEY`,
 |---|---|
 | UID | `prometheus-remote-writer release signing (opennms-forge) <ronny@no42.org>` |
 | Algorithm | RSA 4096 |
-| Long key ID | `<TODO: populate after Phase 1 key generation, e.g. 0xABCDEF1234567890>` |
-| Fingerprint | `<TODO: populate, 40 hex chars in 5-group format, e.g. ABCD EFGH IJKL MNOP QRST  UVWX YZAB CDEF GHIJ KLMN>` |
-| Validity | `<TODO: 2026-MM-DD through 2028-MM-DD>` |
+| Long key ID | `0x1FC793D7F2E3FDDD` |
+| Fingerprint | `53BC D4E3 C0CC 9ACF 40F4  6669 1FC7 93D7 F2E3 FDDD` |
+| Validity | `<TODO: populate from `gpg --list-secret-keys --keyid-format=long --fingerprint` `[expires: ...]` clause>` |
 
 **This is the canonical fingerprint.** Cross-check against the `KEYS`
 file on any GitHub Release before trusting that release's signatures —
