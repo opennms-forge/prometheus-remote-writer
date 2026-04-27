@@ -1084,6 +1084,55 @@ class PrometheusRemoteWriterConfigTest {
                 .hasMessageContaining("wire.protocol-version");
     }
 
+    // The enum-typed overloads exist for the same Aries Blueprint
+    // PropertyDescriptor reason as setWireProtocolVersion(int) — without
+    // them, Sentinel's blueprint refuses to instantiate the bean because
+    // no setter matches the FsyncPolicy / OverflowPolicy getter return
+    // type. See setMetadataCase for the original instance of the pattern.
+
+    @Test
+    void wal_fsync_enum_setter_accepts_each_policy() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setWalFsync(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.ALWAYS);
+        assertThat(c.getWalFsync())
+                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.ALWAYS);
+        c.setWalFsync(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.NEVER);
+        assertThat(c.getWalFsync())
+                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.NEVER);
+        c.setWalFsync(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.BATCH);
+        assertThat(c.getWalFsync())
+                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.BATCH);
+    }
+
+    @Test
+    void wal_fsync_enum_setter_null_defaults_to_batch() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setWalFsync(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.ALWAYS);
+        c.setWalFsync((org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy) null);
+        assertThat(c.getWalFsync())
+                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.BATCH);
+    }
+
+    @Test
+    void wal_overflow_enum_setter_accepts_each_policy() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setWalOverflow(org.opennms.plugins.prometheus.remotewriter.wal.WalWriter.OverflowPolicy.DROP_OLDEST);
+        assertThat(c.getWalOverflow())
+                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalWriter.OverflowPolicy.DROP_OLDEST);
+        c.setWalOverflow(org.opennms.plugins.prometheus.remotewriter.wal.WalWriter.OverflowPolicy.BACKPRESSURE);
+        assertThat(c.getWalOverflow())
+                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalWriter.OverflowPolicy.BACKPRESSURE);
+    }
+
+    @Test
+    void wal_overflow_enum_setter_null_defaults_to_backpressure() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setWalOverflow(org.opennms.plugins.prometheus.remotewriter.wal.WalWriter.OverflowPolicy.DROP_OLDEST);
+        c.setWalOverflow((org.opennms.plugins.prometheus.remotewriter.wal.WalWriter.OverflowPolicy) null);
+        assertThat(c.getWalOverflow())
+                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalWriter.OverflowPolicy.BACKPRESSURE);
+    }
+
     // ---------- helpers -----------------------------------------------------
 
     private static PrometheusRemoteWriterConfig minimal() {
