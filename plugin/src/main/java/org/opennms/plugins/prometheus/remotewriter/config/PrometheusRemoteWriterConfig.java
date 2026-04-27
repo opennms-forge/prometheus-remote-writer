@@ -668,6 +668,14 @@ public class PrometheusRemoteWriterConfig {
         }
     }
 
+    // Aries Blueprint requires at least one setter to match the getter's
+    // return type. Without this overload the String setter above is the
+    // only pairing candidate and Sentinel's blueprint rejects the bean.
+    // Same pattern as setMetadataCase / setWireProtocolVersion(int).
+    public void setWalFsync(WalSegment.FsyncPolicy v) {
+        walFsync = v == null ? WalSegment.FsyncPolicy.BATCH : v;
+    }
+
     public void setWireProtocolVersion(String v) {
         // Treat null, empty, AND whitespace-only as "use default" so an
         // operator config of `wire.protocol-version =   ` doesn't throw.
@@ -685,6 +693,20 @@ public class PrometheusRemoteWriterConfig {
         }
     }
 
+    // Aries Blueprint requires at least one setter to match the getter's
+    // return type. Without this overload the String setter above is the
+    // only pairing candidate and Sentinel's blueprint rejects the bean
+    // with "At least one Setter method has to match the type of the
+    // Getter method for property wireProtocolVersion". Same pattern as
+    // setMetadataCase below.
+    public void setWireProtocolVersion(int v) {
+        switch (v) {
+            case 1, 2 -> wireProtocolVersion = v;
+            default -> throw new IllegalStateException(
+                "wire.protocol-version must be 1 or 2, got: " + v);
+        }
+    }
+
     public void setWalOverflow(String v) {
         if (isBlank(v)) {
             walOverflow = WalWriter.OverflowPolicy.BACKPRESSURE;
@@ -699,6 +721,16 @@ public class PrometheusRemoteWriterConfig {
                 "wal.overflow must be 'backpressure' or 'drop-oldest', got: " + v);
         }
     }
+
+    // Aries Blueprint requires at least one setter to match the getter's
+    // return type. Without this overload the String setter above is the
+    // only pairing candidate and Sentinel's blueprint rejects the bean.
+    // Same pattern as setMetadataCase / setWireProtocolVersion(int) /
+    // setWalFsync(FsyncPolicy).
+    public void setWalOverflow(WalWriter.OverflowPolicy v) {
+        walOverflow = v == null ? WalWriter.OverflowPolicy.BACKPRESSURE : v;
+    }
+
     // Aries Blueprint requires at least one setter to match the getter's
     // return type (JavaBean property contract). Without this overload the
     // String setter above is the only pairing candidate and blueprint
