@@ -88,8 +88,18 @@ If the pom is still on `0.1.0-SNAPSHOT` and you're cutting `v0.1.0`, strip the
 
 ```bash
 ./mvnw versions:set -DnewVersion=0.1.0 -DgenerateBackupPoms=false
-git diff   # sanity-check
+git status   # sanity-check — versions:set updates ALL 5 poms
+            # (root + 4 child modules), not just the root
 ```
+
+> **⚠️ Footgun, learned the hard way during v0.3.2.** `versions:set`
+> modifies the root `pom.xml` AND each child module's `<parent><version>`
+> reference (`plugin/pom.xml`, `karaf-features/pom.xml`,
+> `assembly/kar/pom.xml`, `docs/pom.xml`). All 5 must be staged together.
+> Staging only the root pom (`git add pom.xml`) leaves the children
+> stuck at the previous SNAPSHOT version, and the release CI fails with
+> `Non-resolvable parent POM`. Local `make build` may still succeed
+> because of a cached parent install — only CI catches this.
 
 Edit `CHANGELOG.md`:
 
@@ -98,10 +108,12 @@ Edit `CHANGELOG.md`:
 - Add a fresh empty `## [Unreleased]` at the top.
 - Update the comparison links at the bottom of the file.
 
-Commit both changes together:
+Commit all changes together (note: `*/pom.xml` covers the 4 child
+modules; `git add -u` would also work since `versions:set` only touches
+already-tracked files):
 
 ```bash
-git add pom.xml CHANGELOG.md
+git add pom.xml */pom.xml */**/pom.xml CHANGELOG.md
 git commit -m "release: v0.1.0"
 ```
 
