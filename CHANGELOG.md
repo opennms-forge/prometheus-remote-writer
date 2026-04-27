@@ -7,6 +7,15 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **CycloneDX SBOM attached to releases.** Each GitHub Release now ships a
+  `prometheus-remote-writer-<version>.cdx.json` asset alongside the KAR.
+  CycloneDX 1.6 JSON, aggregate across the full Maven reactor (compile +
+  runtime scopes, no test scope). Generate locally with `make sbom`; opt-in
+  via the `sbom` Maven profile, so default `make build` and `make kar`
+  remain unchanged. See [`RELEASING.md`](RELEASING.md) "What gets published".
+
 ## [0.3.1] — 2026-04-27
 
 Patch release whose headline is the **Aries Blueprint setter-overload fix**:
