@@ -1,0 +1,57 @@
+# Compose override layered onto compose.yml — wires the locally-built KAR
+# into Sentinel's deploy/ directory, mounts the per-role etc-overlays, and
+# exposes the ports an operator typically wants for the spike (Karaf SSH
+# on Core/Sentinel/Minion, web UI on Core, Prometheus, Kafka).
+#
+# Used implicitly by `docker compose -f compose.yml up -d` (Compose v2
+# auto-applies compose.override.yml when present).
+#
+# Core does NOT mount the KAR — the spike's whole point is that the
+# plugin runs on Sentinel only. Core falls back to its default RRDtool
+# strategy for any SNMP-poll samples it produces locally; those samples
+# land as RRD files inside the container and are irrelevant to the
+# Sentinel-side persistence path.
+
+services:
+
+  postgres:
+    ports:
+      - "5432/tcp"
+
+  kafka:
+    ports:
+      - "9092/tcp"
+
+  elasticsearch:
+    ports:
+      - "9200/tcp"
+
+  prometheus:
+    ports:
+      - "9090:9090/tcp"
+
+  core:
+    ports:
+      - "8980:8980/tcp"   # Web UI / REST
+      - "8101:8101/tcp"   # Karaf SSH (admin/admin)
+    volumes:
+      # opennms-etc-overlay is the OpenNMS Horizon container's well-known
+      # path for confd-bypassing config injection. The container copies
+      # everything under it into /opt/opennms/etc on first boot.
+      - ./container-fs/core-etc-overlay:/opt/opennms-etc-overlay:ro
+
+  minion:
+    ports:
+      - "8201:8201/tcp"   # Karaf SSH (admin/admin)
+    volumes:
+      - ./container-fs/minion-etc-overlay:/opt/minion-etc-overlay:ro
+
+  sentinel:
+    ports:
+      - "8301:8301/tcp"   # Karaf SSH (admin/admin)
+    volumes:
+      # Per-playground convention, sentinel-etc-overlay → /opt/sentinel/etc
+      # files on first boot. confd is intentionally bypassed.
+      - ./container-fs/sentinel-etc-overlay:/opt/sentinel-etc-overlay:ro
+      # Same hot-deploy mechanism as Core, against Sentinel's deploy dir.
+      - ../../assembly/kar/target:/opt/sentinel/deploy:ro

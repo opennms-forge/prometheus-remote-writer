@@ -1,0 +1,10 @@
+# Minimal Prometheus config for the Sentinel spike.
+# Samples arrive via remote-write from the plugin (running on either Core
+# or Sentinel); Prometheus stores them and serves /api/v1/* back.
+
+global:
+  scrape_interval:     60s
+  evaluation_interval: 60s
+
+# No scrape jobs — every series enters via remote-write.
+scrape_configs: []
