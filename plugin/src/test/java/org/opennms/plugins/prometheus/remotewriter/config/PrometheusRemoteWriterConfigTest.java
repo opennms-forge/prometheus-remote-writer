@@ -1059,6 +1059,31 @@ class PrometheusRemoteWriterConfigTest {
             .anyMatch(l -> l.startsWith("wire.protocol-version: 1 -> 2"));
     }
 
+    // The int overload exists so Aries Blueprint's PropertyDescriptor
+    // validation finds a setter matching getWireProtocolVersion()'s int
+    // return type. Sentinel's blueprint enforces this strictly; without
+    // the overload the plugin bundle fails to start. See setMetadataCase
+    // for the analogous fix.
+    @Test
+    void wire_protocol_version_int_setter_accepts_one_and_two() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setWireProtocolVersion(1);
+        assertThat(c.getWireProtocolVersion()).isEqualTo(1);
+        c.setWireProtocolVersion(2);
+        assertThat(c.getWireProtocolVersion()).isEqualTo(2);
+    }
+
+    @Test
+    void wire_protocol_version_int_setter_rejects_unknown_values() {
+        PrometheusRemoteWriterConfig c = minimal();
+        assertThatThrownBy(() -> c.setWireProtocolVersion(0))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("wire.protocol-version");
+        assertThatThrownBy(() -> c.setWireProtocolVersion(3))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("wire.protocol-version");
+    }
+
     // ---------- helpers -----------------------------------------------------
 
     private static PrometheusRemoteWriterConfig minimal() {
