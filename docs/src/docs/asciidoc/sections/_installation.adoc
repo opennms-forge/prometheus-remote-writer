@@ -14,36 +14,26 @@ The plugin's OSGi bundle is compiled to Java {java-target-version} bytecode
 to match Horizon's runtime; running on an older JVM fails feature
 resolution at install time.
 
-== Install on a running Horizon instance
+== Install on OpenNMS Horizon Core
 
 The plugin ships as a Karaf KAR (`prometheus-remote-writer-kar-X.Y.Z.kar`).
-Two install paths are available — pick whichever fits your deployment.
-
-=== Path A: KAR drop (current shipping path)
+Drop it into Karaf's `deploy` directory and Karaf hot-installs it:
 
 [source,bash]
 ----
-# 1. Download the KAR from the GitHub Release matching your installed version.
-#    Example for v0.3.0:
+# Download the KAR from the GitHub Release matching your installed version.
+# Example for v0.3.0:
 curl -L -o /opt/opennms/deploy/prometheus-remote-writer.kar \
     {project-repo-url}/releases/download/v{revnumber}/{project-artifact}-kar-{revnumber}.kar
 ----
 
-Karaf's `deploy` directory hot-installs `.kar` artifacts on drop. Confirm
-from the Karaf shell:
+Confirm from the Karaf shell:
 
 [source,bash]
 ----
 ssh -p 8101 admin@localhost
 karaf@root()> bundle:list -s | grep prometheus-remote-writer
 ----
-
-=== Path B: feature install via Maven coordinates (deferred)
-
-The Maven-coordinate install (`feature:repo-add mvn:…/xml/features`)
-requires the project's artifacts to be published to a Maven repository.
-That step is deferred until the repo migrates under the OpenNMS namespace
-and a publish target is chosen — see `RELEASING.md` in the source tree.
 
 == Activate the plugin as the active TSS
 
@@ -54,8 +44,21 @@ Set the time-series strategy in `etc/opennms.properties.d/timeseries.properties`
 {tss-strategy-key} = {tss-strategy-value}
 ----
 
-Restart OpenNMS for the strategy switch to take effect. The next collector
+Restart Core for the strategy switch to take effect. The next collector
 flush sends samples through the plugin.
+
+[TIP]
+.Drop in the minimal metatag config before you restart
+====
+By default, OpenNMS does not attach node, foreign-source, location, or
+interface tags to samples — they arrive at the plugin carrying only
+`name` and `resourceId`, and your Prometheus series end up with bare
+`{resourceId="…"}` labels regardless of any plugin-side config. Add
+the four-line snippet in <<minimal-metatag-config>> alongside the
+strategy switch above so the first samples already carry useful
+labels (`node`, `instance`, `node_label`, `foreign_source`,
+`foreign_id`, `location`).
+====
 
 == Minimum configuration
 
@@ -92,8 +95,8 @@ through the plugin.
 ====
 By default, samples arriving at the plugin carry only `name` and
 `resourceId` — OpenNMS does not attach node/interface/asset metatags
-unless you configure them. See <<label-mapping>> for the four-line
-metatags config that turns those tags on.
+unless you configure them. See <<minimal-metatag-config>> for the
+four-line metatags config that turns those tags on.
 ====
 
 == Local sandbox (e2e)
