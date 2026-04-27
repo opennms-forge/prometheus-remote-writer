@@ -15,6 +15,13 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   runtime scopes, no test scope). Generate locally with `make sbom`; opt-in
   via the `sbom` Maven profile, so default `make build` and `make kar`
   remain unchanged. See [`RELEASING.md`](RELEASING.md) "What gets published".
+- **GPG-signed releases.** Each GitHub Release now ships detached GPG
+  signatures (`.asc`) for the KAR, the SHA-512 checksum file, and the SBOM,
+  plus a `KEYS` file with the project public key. Release tags themselves
+  are GPG-signed by the project key (the workflow refuses to publish from
+  an unsigned tag). See [`RELEASING.md`](RELEASING.md) "Release signing key"
+  for the canonical fingerprint and "Verifying a release" for the
+  consumer-facing verification steps.
 
 ## [0.3.1] — 2026-04-27
 
