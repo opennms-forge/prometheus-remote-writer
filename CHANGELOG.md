@@ -7,21 +7,82 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-04-27
+
+A maintenance release whose headline is **the project's new home**: the
+repository has migrated from `labmonkeys-space/prometheus-remote-writer`
+to `opennms-forge/prometheus-remote-writer`, and this is the first release
+shipped from the new owner. The same release closes the **supply-chain
+v1** loop with a CycloneDX 1.6 SBOM and GPG-signed artifacts attached
+to every GitHub Release.
+
+**No runtime behaviour change.** The plugin code, wire format, configuration
+surface, and KAR contents are unchanged from v0.3.1. Existing v0.3.1
+deployments do not need to upgrade for any fix. The upgrade is appropriate
+if you want signed artifacts for verification, the SBOM for vulnerability
+scanning, or the canonical opennms-forge URLs in your bookmarks and
+documentation links.
+
 ### Added
 
-- **CycloneDX SBOM attached to releases.** Each GitHub Release now ships a
-  `prometheus-remote-writer-<version>.cdx.json` asset alongside the KAR.
-  CycloneDX 1.6 JSON, aggregate across the full Maven reactor (compile +
-  runtime scopes, no test scope). Generate locally with `make sbom`; opt-in
-  via the `sbom` Maven profile, so default `make build` and `make kar`
-  remain unchanged. See [`RELEASING.md`](RELEASING.md) "What gets published".
-- **GPG-signed releases.** Each GitHub Release now ships detached GPG
-  signatures (`.asc`) for the KAR, the SHA-512 checksum file, and the SBOM,
-  plus a `KEYS` file with the project public key. Release tags themselves
-  are GPG-signed by the project key (the workflow refuses to publish from
-  an unsigned tag). See [`RELEASING.md`](RELEASING.md) "Release signing key"
-  for the canonical fingerprint and "Verifying a release" for the
+- **CycloneDX 1.6 SBOM attached to every GitHub Release.** Aggregate across
+  the full Maven reactor (compile + runtime scopes; test scope excluded),
+  shipped as `prometheus-remote-writer-<version>.cdx.json` alongside the
+  KAR. Generate locally with `make sbom` (opt-in via the `sbom` Maven
+  profile, so default `make build` and `make kar` are unchanged). Consumed
+  by Trivy / Grype / Dependency-Track / FOSSA-style supply-chain tooling.
+- **GPG-signed releases.** Every GitHub Release now ships detached GPG
+  signatures (`.asc`) for the KAR, the SHA-512 checksum file, and the SBOM.
+  The release tag itself is GPG-signed by the project key — the release
+  workflow refuses to publish from an unsigned tag. The public key ships
+  as a `KEYS` release asset; the canonical fingerprint is published in
+  [`RELEASING.md`](RELEASING.md) "Release signing key" for out-of-band
+  cross-check. See "Verifying a release" in the same document for the
   consumer-facing verification steps.
+- **`AGENTS.md` at the repository root**, declaring
+  `opennms-forge/prometheus-remote-writer` as the canonical repository and
+  prohibiting AI agents from pushing to non-canonical copies.
+
+### Changed
+
+- **Repository home migrated** from `labmonkeys-space/prometheus-remote-writer`
+  to `opennms-forge/prometheus-remote-writer`. All in-tree URL references
+  (README, RELEASING, docs `_attributes.adoc`, CI badges, issue tracker,
+  comparison links) updated to the new owner. The legacy GitHub redirect
+  remains active for in-flight clones, but new bookmarks should target the
+  canonical home.
+- **Docs site republished** at <https://opennms-forge.github.io/prometheus-remote-writer/>.
+  The previous `labmonkeys-space.github.io/prometheus-remote-writer/` URL no
+  longer serves content (cross-org GitHub Pages does not redirect).
+- **Author attribution recorded across the source tree.** All 62 `.java`
+  files now use the SPDX-Identifier short-form copyright header with a
+  `Created by Ronny Trommer <ronny@opennms.com>, <ronny@no42.org>` line.
+  The parent `pom.xml` gained a `<developers>` block, an `<scm>` block,
+  and an `<issueManagement>` block all pointing at the new owner.
+- **Dependency modernization** via Dependabot cascade. All updates picked
+  up green CI:
+  - `org.junit:junit-bom` 5.11.3 → 6.0.3 (major)
+  - `com.google.protobuf:protobuf-java` 3.25.5 → 4.34.1 (major)
+  - `org.assertj:assertj-core` 3.26.3 → 3.27.7
+  - `org.json:json` 20240303 → 20251224
+  - `org.slf4j:slf4j-api` 2.0.13 → 2.0.17
+  - `maven-surefire-plugin` and `maven-failsafe-plugin` 3.5.2 → 3.5.5
+  - `actions/configure-pages` v5 → v6
+  - `actions/deploy-pages` v4 → v5
+  - `actions/upload-pages-artifact` v3 → v5
+
+### Fixed
+
+- **GitHub Pages self-heal.** The `publish-docs.yml` workflow now verifies
+  Pages is in `build_type=workflow` mode before deploying. During the
+  Dependabot cascade, an interaction between `actions/configure-pages@v6`
+  and the existing Pages config flipped the build type to `legacy`,
+  silently letting classic Jekyll auto-build the README and shadow the
+  AsciiDoc docs. The new verify step fails the workflow loudly if the flip
+  recurs, surfacing the regression rather than silently publishing the
+  wrong content. (Auto-correction would require admin scope, which the
+  workflow's `GITHUB_TOKEN` cannot have; the verify-and-fail-loudly
+  pattern keeps the workflow self-defended without elevated permissions.)
 
 ## [0.3.1] — 2026-04-27
 
@@ -643,7 +704,9 @@ Go sanitization rules.
 - Karaf feature `prometheus-remote-writer` shipping a pre-populated
   `etc/org.opennms.plugins.tss.prometheusremotewriter.cfg` on install.
 
-[Unreleased]: https://github.com/opennms-forge/prometheus-remote-writer/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/opennms-forge/prometheus-remote-writer/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/opennms-forge/prometheus-remote-writer/compare/v0.3.1...v0.3.2
+[0.3.1]: https://github.com/opennms-forge/prometheus-remote-writer/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/opennms-forge/prometheus-remote-writer/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/opennms-forge/prometheus-remote-writer/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/opennms-forge/prometheus-remote-writer/releases/tag/v0.1.0
