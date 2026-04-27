@@ -7,6 +7,95 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-04-27
+
+Patch release whose headline is the **Aries Blueprint setter-overload fix**:
+without it, the plugin bundle in v0.3.0 fails to start on Karaf containers
+with strict Blueprint validation (notably OpenNMS Sentinel 35.0.5). Existing
+Horizon Core deployments work fine on v0.3.0, so this is a low-urgency upgrade
+unless you intend to install the plugin on a strict-Blueprint container.
+
+Also bundled: spike-driven docs sharpening that nails down the plugin's
+*Horizon Core only* deployment scope, an inlined Makefile smoke harness, and
+an opt-in Sentinel deployment proof-of-concept that lives outside the public
+docs (developer-iteration surface only).
+
+### Fixed
+
+- **Aries Blueprint property type-match** — added `int` / enum setter
+  overloads for `wireProtocolVersion`, `walFsync`, and `walOverflow` on
+  `PrometheusRemoteWriterConfig` (#25, #26). Aries Blueprint's
+  `PropertyDescriptor` validation rejects beans whose getter returns a
+  non-`String` while the only setter takes `String`. Without the
+  overloads, the plugin bundle fails to start on strict Blueprint
+  containers like OpenNMS Sentinel 35.0.5 with errors of the form
+  `At least one Setter method has to match the type of the Getter method
+  for property <name>`. Same pattern was previously fixed for
+  `metadataCase`; the v2 wire-format work missed it.
+- **README Compatibility table** — markup was data rows only with no
+  header / separator, so GitHub squashed the four lines into one
+  unreadable block. Now renders as a proper table.
+
+### Changed
+
+- **Install heading narrowed to "Install on OpenNMS Horizon Core"**
+  (was "Install on a running Horizon instance"). Matches the new
+  *What this plugin does NOT* overview admonition. The follow-up
+  "Restart OpenNMS for the strategy switch to take effect" line is
+  also tightened to "Restart Core …".
+- **Smoke harness lives in the Makefile.** `e2e/smoke.sh` removed;
+  `make smoke` (and per-backend `make smoke-prometheus` /
+  `smoke-mimir` / `smoke-victoriametrics`) carry the same shape.
+  New tunables: `BACKENDS`, `SMOKE_TIMEOUT`, `SMOKE_POLL`. Per
+  project convention, CI invokes Makefile targets directly.
+- **Metatag heads-up moved earlier in the install flow.** A new TIP
+  in *Activate the plugin as the active TSS* points at the
+  *Minimal metatag config* subsection so operators set up node /
+  foreign-source / location labels alongside the strategy switch
+  rather than discovering bare-`resourceId` series after restart.
+- **Compatibility entry** — *OpenNMS Horizon* renamed to
+  *OpenNMS Horizon Core* in the README.
+
+### Added
+
+- **"What this plugin does NOT" section** in the docs overview —
+  explicitly states the plugin runs on Horizon Core only and is not
+  yet supported on Sentinel, with the architectural reason
+  (no Core → Sentinel sample-dispatch path in OpenNMS upstream for
+  OIA TSS plugins).
+- **End-to-end sandbox docs section** — content from `e2e/README.md`
+  migrated into the AsciiDoc docs site. `e2e/README.md` slimmed to
+  a quick-reference card pointing at the docs.
+- **`sentinel-deployment` spec capability** — captures the spike's
+  empirically-verified plugin behaviour on Sentinel (installability,
+  OIA TSS service binding, Sentinel-side gotchas to work around,
+  reference Compose stack). Lives in `openspec/specs/`.
+- **Sentinel deployment proof-of-concept stack** under `e2e/sentinel/`
+  — runnable via `make sentinel-poc` / `make sentinel-poc-down` for
+  ongoing iteration. **Developer-iteration surface only**: deliberately
+  excluded from the public docs and from `make smoke`'s default
+  `BACKENDS` list because no sample driver is wired in today and
+  the upstream Core → Sentinel sample-dispatch gap blocks end-to-end
+  sample flow for OIA TSS plugins generally.
+
+### Removed
+
+- **`e2e/smoke.sh`** — replaced by the Makefile-based smoke harness.
+- **"Path B: feature install via Maven coordinates (deferred)"**
+  install subsection — the plugin isn't published to a Maven repo
+  today, so advertising the option as deferred only added noise.
+  Single linear install flow now: drop the KAR, verify.
+
+### Compatibility
+
+- **OpenNMS Horizon Core** 35+ (Java 17, Karaf 4.4.x) — same as v0.3.0.
+  No breaking config changes.
+- **OpenNMS Sentinel** — installable but **not supported as a
+  deployment surface** for sample flow yet. The plugin's bundle
+  reaches `Active` and the OIA `TimeSeriesStorage` service registers,
+  but no documented path exists today by which Core-collected samples
+  reach a Sentinel-side persister via OIA TSS.
+
 ## [0.3.0] — 2026-04-26
 
 ### Added
