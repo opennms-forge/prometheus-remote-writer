@@ -34,3 +34,5 @@ include::sections/_backends.adoc[leveloffset=+1]
 include::sections/_operations.adoc[leveloffset=+1]
 
 include::sections/_troubleshooting.adoc[leveloffset=+1]
+
+include::sections/_e2e-sandbox.adoc[leveloffset=+1]
