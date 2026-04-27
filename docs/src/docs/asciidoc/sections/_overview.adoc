@@ -15,6 +15,25 @@ the resulting time series with PromQL directly, from Grafana's native
 Prometheus data source. No OpenNMS-side query plugin and no round-trip to
 the OpenNMS REST API are required at query time.
 
+== What this plugin does NOT
+
+[IMPORTANT]
+====
+This plugin runs on **OpenNMS Horizon Core only**. It is not yet
+supported on OpenNMS Sentinel.
+====
+
+The KAR will install cleanly into `/opt/sentinel/deploy/` and the
+plugin's `TimeSeriesStorage` OSGi service will register, but no
+samples will reach it: OpenNMS upstream has no Core → Sentinel
+sample-dispatch path for OIA TSS plugins, and the Sentinel-side
+streaming-telemetry adapter pipeline (architecturally compatible
+in principle) has not been verified end-to-end with this plugin.
+
+If you need to offload sample persistence to a Sentinel container
+today, this is not the right plugin yet. Install it on Horizon
+Core and use the rest of this guide.
+
 == Where it fits
 
 [.text-center]

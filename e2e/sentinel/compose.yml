@@ -1,0 +1,192 @@
+# E2E spike — Sentinel as the TSS persister.
+#
+# Self-contained stack standing up the full OpenNMS distributed topology
+# (Core + Minion + Sentinel + Kafka + Postgres + Elasticsearch + Prometheus)
+# so the prometheus-remote-writer plugin can be exercised on the Sentinel
+# container — the deployment surface that this OpenSpec change
+# (`add-sentinel-deployment-spike`) is verifying.
+#
+# This file deliberately does NOT extend ../compose.base.yml — that base is
+# tuned for a single-core sandbox without the IPC fabric Sentinel needs.
+# Once the spike confirms the working hypotheses, the existing e2e/ flat
+# layout and this scenario layout can be reconciled in a follow-up change.
+#
+# Usage:
+#   make -C ../.. kar                              # build KAR once
+#   docker compose -f compose.yml up -d
+#   docker compose -f compose.yml down -v
+#
+# Working hypothesis (per design.md Decision 1, 5):
+#   - Sentinel honours `org.opennms.timeseries.strategy=integration` from
+#     etc/custom.properties.
+#   - sentinel-kafka + sentinel-telemetry features expose the OIA
+#     TimeSeriesStorage SPI to telemetry-adapter samples.
+#   - The plugin's KAR resolves unmodified against Sentinel's feature repo.
+# These hypotheses are confirmed (or not) during tasks 3.x / 4.x of
+# tasks.md. Adjust this file only if the spike disconfirms a hypothesis.
+
+name: prometheus-remote-writer-sentinel-e2e
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER:     postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB:       postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout:  3s
+      retries:  20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  # KRaft-mode single-node Kafka. Same image and env shape as the
+  # indigo423/opennms-playground reference stack.
+  kafka:
+    image: apache/kafka:4.1.1
+    environment:
+      TZ: UTC
+      KAFKA_KRAFT_MODE: "true"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_NODE_ID: "1"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka:9092 >/dev/null 2>&1"]
+      interval: 5s
+      timeout:  5s
+      retries:  20
+
+  # Elasticsearch is required by the default Sentinel boot (sentinel-flows
+  # feature pulls in opennms-elastic-client). Single-node, security off —
+  # this is a sandbox.
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.28
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s >/dev/null"]
+      interval: 5s
+      timeout:  5s
+      retries:  20
+
+  prometheus:
+    image: prom/prometheus:v2.53.2
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-remote-write-receiver"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/ready"]
+      interval: 5s
+      timeout:  3s
+      retries:  20
+
+  core:
+    image: opennms/horizon:latest
+    command: ["-s"]
+    stop_grace_period: 2s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      TZ: UTC
+      POSTGRES_HOST:     postgres
+      POSTGRES_PORT:     "5432"
+      POSTGRES_USER:     postgres
+      POSTGRES_PASSWORD: postgres
+      OPENNMS_DBNAME:    opennms
+      OPENNMS_DBUSER:    opennms
+      OPENNMS_DBPASS:    opennms
+      JAVA_OPTS: "-Xmx2g -XX:MaxMetaspaceSize=1g"
+    volumes:
+      - opennms-data:/opennms-data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:8980/opennms/login.jsp"]
+      interval: 10s
+      timeout:  5s
+      retries:  60
+      start_period: 30s
+
+  minion:
+    image: opennms/minion:latest
+    command: ["-f"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      TZ: UTC
+      JAVA_OPTS: "-Xmx512m"
+      MINION_ID: "minion-sentinel-poc"
+      MINION_LOCATION: "Default"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/minion/bin/client -u admin -h localhost -p 8201 -- 'health:check' 2>/dev/null | grep -q 'health is OK' || exit 1"]
+      interval: 10s
+      timeout:  5s
+      retries:  20
+      start_period: 30s
+
+  sentinel:
+    image: opennms/sentinel:latest
+    command: ["-f"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      TZ: UTC
+      JAVA_MIN_MEM: "512M"
+      JAVA_MAX_MEM: "2048M"
+      # The container's entrypoint appends to $JAVA_OPTS, so values set
+      # here are preserved alongside its --add-opens / opennms.home
+      # additions. We pass:
+      #   - timeseries.strategy: routes persistence through OIA TSS SPI
+      #   - core.ipc.{sink,rpc,twin}.strategy: selects Kafka as the IPC
+      #     fabric so Sentinel can consume from / publish to the same
+      #     topics as Core. (Per-implementation Kafka client config
+      #     lives in dedicated .cfg files in the etc-overlay.)
+      JAVA_OPTS: >-
+        -Dorg.opennms.timeseries.strategy=integration
+        -Dorg.opennms.core.ipc.sink.strategy=kafka
+        -Dorg.opennms.core.ipc.rpc.strategy=kafka
+        -Dorg.opennms.core.ipc.twin.strategy=kafka
+      POSTGRES_HOST:     postgres
+      POSTGRES_PORT:     "5432"
+      POSTGRES_DB:       opennms
+      POSTGRES_USER:     postgres
+      POSTGRES_PASSWORD: postgres
+      OPENNMS_BROKER_URL: ""
+      SENTINEL_ID: "sentinel-poc"
+      SENTINEL_LOCATION: "Default"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/sentinel/bin/client -u admin -h localhost -p 8301 -- 'health:check' 2>/dev/null | grep -q 'health is OK' || exit 1"]
+      interval: 10s
+      timeout:  5s
+      retries:  20
+      start_period: 60s
+
+volumes:
+  postgres-data:
+  opennms-data:
+  prometheus-data:
