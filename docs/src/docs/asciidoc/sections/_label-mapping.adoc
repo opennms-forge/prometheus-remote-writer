@@ -58,6 +58,7 @@ this plugin carrying only `name` and `resourceId`* — and your Prometheus
 series will have bare `{resourceId="…"}` labels regardless of what this
 plugin is configured to emit.
 
+[#minimal-metatag-config]
 === Minimal metatag config
 
 Put these four lines in `etc/opennms.properties.d/metatags.properties`
