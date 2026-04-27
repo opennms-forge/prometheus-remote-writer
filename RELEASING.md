@@ -27,7 +27,7 @@ the release artifacts (in CI from secrets `PRW_GPG_PRIVATE_KEY`,
 | Algorithm | RSA 4096 |
 | Long key ID | `0x1FC793D7F2E3FDDD` |
 | Fingerprint | `53BC D4E3 C0CC 9ACF 40F4  6669 1FC7 93D7 F2E3 FDDD` |
-| Validity | `<TODO: populate from `gpg --list-secret-keys --keyid-format=long --fingerprint` `[expires: ...]` clause>` |
+| Validity | `2026-04-27 through 2028-04-26` (2-year expiry) |
 
 **This is the canonical fingerprint.** Cross-check against the `KEYS`
 file on any GitHub Release before trusting that release's signatures —
