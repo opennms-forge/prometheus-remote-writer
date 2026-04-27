@@ -627,7 +627,7 @@ Go sanitization rules.
 - Karaf feature `prometheus-remote-writer` shipping a pre-populated
   `etc/org.opennms.plugins.tss.prometheusremotewriter.cfg` on install.
 
-[Unreleased]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.3.0...HEAD
-[0.3.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/releases/tag/v0.1.0
+[Unreleased]: https://github.com/opennms-forge/prometheus-remote-writer/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/opennms-forge/prometheus-remote-writer/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/opennms-forge/prometheus-remote-writer/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/opennms-forge/prometheus-remote-writer/releases/tag/v0.1.0
