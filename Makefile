@@ -14,6 +14,7 @@
 #                             stack interactively (no auto-teardown)
 #   make sentinel-poc-down    Tear down the proof-of-concept stack (removes volumes)
 #   make docs          Render single-page HTML documentation
+#   make sbom          Generate CycloneDX 1.6 aggregate SBOM (target/bom.json)
 #   make clean         Remove all build artifacts
 #
 # Overridable variables:
@@ -53,7 +54,7 @@ BACKENDS               ?= $(SMOKE_DEFAULT_BACKENDS)
 
 .PHONY: help build test verify kar smoke \
         smoke-prometheus smoke-mimir smoke-victoriametrics smoke-sentinel \
-        sentinel-poc sentinel-poc-down docs clean test-class
+        sentinel-poc sentinel-poc-down docs sbom clean test-class
 
 .DEFAULT_GOAL := help
 
@@ -171,6 +172,9 @@ sentinel-poc-down: ## Tear down the Sentinel proof-of-concept stack and remove i
 docs: ## Render single-page HTML documentation to docs/target/generated-docs
 	$(MVN) $(MAVEN_FLAGS) -pl :prometheus-remote-writer-docs -am -DskipTests \
 	  org.asciidoctor:asciidoctor-maven-plugin:process-asciidoc
+
+sbom: ## Generate CycloneDX 1.6 aggregate SBOM (target/bom.json) — opt-in, gated by the sbom Maven profile
+	$(MVN) $(MAVEN_FLAGS) -Psbom -DskipTests package
 
 clean: ## Remove all build artifacts
 	$(MVN) $(MAVEN_FLAGS) clean

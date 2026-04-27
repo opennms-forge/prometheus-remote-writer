@@ -46,6 +46,13 @@ jobs:
         # build would be a problem, but gating here is belt-and-braces.
         run: make kar MAVEN_FLAGS="-B --no-transfer-progress -U"
 
+      - name: Generate SBOM
+        # Activate the opt-in `sbom` profile to produce a CycloneDX 1.6
+        # aggregate SBOM at target/bom.json. The profile is gated so that
+        # local `make build` and `make kar` stay fast; only the release
+        # path generates the SBOM.
+        run: make sbom MAVEN_FLAGS="-B --no-transfer-progress -U"
+
       - name: Resolve tag and version
         id: resolve
         run: |
@@ -100,6 +107,26 @@ jobs:
               --generate-notes \
               "$KAR"
           fi
+
+      - name: Rename and upload SBOM
+        # Rename target/bom.json to prometheus-remote-writer-<version>.cdx.json
+        # and attach it to the release alongside the KAR. --clobber makes
+        # this idempotent across workflow re-runs (the documented recovery
+        # path in RELEASING.md uses workflow_dispatch against an existing
+        # tag — without --clobber a previously-uploaded SBOM would block
+        # the re-run).
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.resolve.outputs.tag }}"
+          VERSION="${{ steps.resolve.outputs.version }}"
+          if [ ! -f target/bom.json ]; then
+            echo "::error::target/bom.json missing; the Generate SBOM step did not produce the expected file." >&2
+            exit 1
+          fi
+          SBOM="prometheus-remote-writer-${VERSION}.cdx.json"
+          cp target/bom.json "$SBOM"
+          gh release upload "$TAG" "$SBOM" --clobber
 
       # The `release: published` event fired by `gh release create` runs
       # under GITHUB_TOKEN, so by design GitHub Actions does NOT cascade

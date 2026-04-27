@@ -121,8 +121,9 @@ For a patch release (e.g. `v0.1.1`) on top of `v0.1.0`:
 | Artifact | Where | How consumed |
 |---|---|---|
 | `prometheus-remote-writer-kar-<version>.kar` | GitHub Release asset | Download and install via Karaf `kar:install <path>` |
-| `prometheus-remote-writer-<version>.jar` (bundle) | Not auto-published in v0.1 | Planned once the repo moves under the OpenNMS namespace and a Maven repo target is chosen |
-| `prometheus-remote-writer-features-<version>-features.xml` | Not auto-published in v0.1 | Same as above — consumed via `feature:repo-add mvn:…/xml/features` when a Maven repo is available |
+| `prometheus-remote-writer-<version>.cdx.json` | GitHub Release asset | CycloneDX 1.6 SBOM (aggregate across the full Maven reactor); fed to Trivy / Grype / Dependency-Track / FOSSA-style consumers. Generate locally with `make sbom`. |
+| `prometheus-remote-writer-<version>.jar` (bundle) | Not auto-published in v0.1 | Planned. The repo's migration to `opennms-forge` is done; remaining decision is the Maven-repo target (Central via Sonatype, GitHub Packages, or a private Nexus). |
+| `prometheus-remote-writer-features-<version>-features.xml` | Not auto-published in v0.1 | Same as above — consumed via `feature:repo-add mvn:…/xml/features` when a Maven repo is available. |
 
 ## Docs site (GitHub Pages)
 
