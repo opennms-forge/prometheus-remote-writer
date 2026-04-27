@@ -20,6 +20,10 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  # Required for the self-heal step that flips Pages back to build_type=workflow
+  # if a regression flips it to legacy. The PUT /repos/{owner}/{repo}/pages
+  # endpoint needs admin scope; pages:write alone is not sufficient.
+  administration: write
 
 # A new run cancels nothing — Pages prefers serializing publishes.
 concurrency:
@@ -72,6 +76,21 @@ jobs:
 
       - name: Render docs
         run: make docs MAVEN_FLAGS="-B --no-transfer-progress -U"
+
+      - name: Ensure Pages build_type=workflow
+        # Self-heal against a regression observed during a Dependabot merge
+        # cascade: GitHub Pages flipped from build_type=workflow to
+        # build_type=legacy, which made classic Jekyll auto-build the README
+        # and overwrite the AsciiDoc docs published by this workflow. Root
+        # cause unidentified (suspected: actions/configure-pages@v6 default
+        # behaviour around existing Pages config). This idempotent PUT
+        # ensures workflow mode before configure-pages runs, so a flip in
+        # legacy mode never silently shadows the docs.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api -X PUT repos/${{ github.repository }}/pages \
+                 -f build_type=workflow
 
       - name: Configure Pages
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d  # v6.0.0
