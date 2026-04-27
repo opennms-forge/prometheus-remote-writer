@@ -15,10 +15,12 @@ Prometheus data source — no OpenNMS REST round-trip at query time.
 
 ## Compatibility
 
-| OpenNMS Horizon  | 35+                          |
-| JVM              | Temurin / OpenJDK 17         |
-| Apache Karaf     | 4.4.x                        |
-| Integration API  | `opennms-integration-api` 2.0 |
+| Component             | Required                       |
+|-----------------------|--------------------------------|
+| OpenNMS Horizon Core  | 35+                            |
+| JVM                   | Temurin / OpenJDK 17           |
+| Apache Karaf          | 4.4.x                          |
+| Integration API       | `opennms-integration-api` 2.0  |
 
 ## Install
 
