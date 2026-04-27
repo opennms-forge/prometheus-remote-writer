@@ -18,8 +18,13 @@ Tags follow [SemVer](https://semver.org): `vMAJOR.MINOR.PATCH` (`v0.1.0`,
 
 The project signs every release with a single project-specific GPG key.
 The same key signs the git tag (locally on the maintainer's laptop) and
-the release artifacts (in CI from secrets `PRW_GPG_PRIVATE_KEY`,
-`PRW_GPG_PASSPHRASE`, `PRW_GPG_KEY_ID`).
+the release artifacts (in CI from **organization-scoped secrets**
+`PRW_GPG_PRIVATE_KEY`, `PRW_GPG_PASSPHRASE`, `PRW_GPG_KEY_ID` set at the
+`opennms-forge` org level, visible to all public repositories in the
+org). The workflow accesses them via the standard
+`${{ secrets.PRW_GPG_* }}` syntax — GitHub merges org-level and
+repo-level secrets transparently. To inspect or rotate them: `gh secret
+list --org opennms-forge | grep PRW_GPG`.
 
 | Field | Value |
 |---|---|
