@@ -17,6 +17,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 
 import org.opennms.integration.api.v1.timeseries.IntrinsicTagNames;
+import org.opennms.integration.api.v1.timeseries.MetaTagNames;
 import org.opennms.integration.api.v1.timeseries.Metric;
 import org.opennms.integration.api.v1.timeseries.Sample;
 import org.opennms.integration.api.v1.timeseries.Tag;
@@ -85,7 +86,8 @@ public final class LabelMapper {
             "if_speed",
             "onms_instance_id",
             "instance",
-            "job");
+            "job",
+            "mtype");
 
     /**
      * Label-name prefixes reserved because multiple labels may be emitted
@@ -305,6 +307,15 @@ public final class LabelMapper {
         putIfPresent(out, "location",       tags, "location");
         putIfPresent(out, "if_name",        tags, "ifName");
         putIfPresent(out, "if_descr",       tags, "ifDescr");
+
+        // mtype — load-bearing for OpenNMS late-aggregation. NewtsConverterUtils
+        // dereferences MetaTagNames.mtype on every Sample returned by the read
+        // path; without an mtype label round-tripped through Prometheus, every
+        // graph fetch NPEs. The source meta tag is set by the OpenNMS writer
+        // for every Sample handed to store(); when absent (non-OpenNMS test
+        // fixtures), the read-side MtypeFallback synthesizes "gauge".
+        consumed.add(MetaTagNames.mtype);
+        putIfPresent(out, "mtype", tags, MetaTagNames.mtype);
 
         // if_speed normalisation
         consumed.add("ifHighSpeed");

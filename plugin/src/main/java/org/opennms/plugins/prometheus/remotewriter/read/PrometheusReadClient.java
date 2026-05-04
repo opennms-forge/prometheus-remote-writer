@@ -20,7 +20,6 @@ import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
 import okhttp3.ResponseBody;
-import org.opennms.integration.api.v1.timeseries.DataPoint;
 import org.opennms.integration.api.v1.timeseries.Metric;
 import org.opennms.integration.api.v1.timeseries.StorageException;
 import org.opennms.integration.api.v1.timeseries.TagMatcher;
@@ -29,6 +28,7 @@ import org.opennms.integration.api.v1.timeseries.TimeSeriesFetchRequest;
 import org.opennms.integration.api.v1.timeseries.immutables.ImmutableTimeSeriesData;
 import org.opennms.plugins.prometheus.remotewriter.config.PrometheusRemoteWriterConfig;
 import org.opennms.plugins.prometheus.remotewriter.http.TlsConfig;
+import org.opennms.plugins.prometheus.remotewriter.metrics.PluginMetrics;
 
 /**
  * Read-side client that talks to the Prometheus HTTP query API. Implements
@@ -49,8 +49,15 @@ public final class PrometheusReadClient {
 
     private final OkHttpClient http;
     private final PrometheusRemoteWriterConfig config;
+    private final MtypeFallback mtypeFallback;
 
+    /** Test-friendly constructor — no metrics sink, so the synthesis counter
+     *  is not driven. Production code uses the two-arg constructor. */
     public PrometheusReadClient(PrometheusRemoteWriterConfig config) {
+        this(config, null);
+    }
+
+    public PrometheusReadClient(PrometheusRemoteWriterConfig config, PluginMetrics metrics) {
         this.config = Objects.requireNonNull(config);
         OkHttpClient.Builder b = new OkHttpClient.Builder()
                 .connectTimeout(config.getHttpConnectTimeoutMs(), TimeUnit.MILLISECONDS)
@@ -58,6 +65,14 @@ public final class PrometheusReadClient {
                 .writeTimeout(config.getHttpWriteTimeoutMs(),     TimeUnit.MILLISECONDS);
         TlsConfig.configure(b, config);
         this.http = b.build();
+        this.mtypeFallback = new MtypeFallback(metrics);
+    }
+
+    /** Visible for tests — exposes the WARN-tracking set so tests can assert
+     *  one-shot semantics and LRU eviction without depending on a logging
+     *  framework. */
+    java.util.Set<String> warnedMtypeMetricsForTesting() {
+        return mtypeFallback.warnedMetricsForTesting();
     }
 
     public void shutdown() {
@@ -93,14 +108,19 @@ public final class PrometheusReadClient {
                 + "/api/v1/series?match[]=" + urlEncode(selector)
                 + "&start=" + startEpoch;
         String body = executeGet(url);
-        return PromResponseParser.parseSeriesResponse(body);
+        List<Metric> raw = PromResponseParser.parseSeriesResponse(body);
+        // Apply the mtype fallback per-Metric — the read path's contract with
+        // OpenNMS-core requires every returned Metric carry an mtype meta tag.
+        List<Metric> out = new java.util.ArrayList<>(raw.size());
+        for (Metric m : raw) out.add(mtypeFallback.apply(m));
+        return out;
     }
 
     /** Translates a fetch request to a {@code /api/v1/query_range} call. */
     public TimeSeriesData getTimeSeriesData(TimeSeriesFetchRequest request) throws StorageException {
         Objects.requireNonNull(request, "request");
-        Metric metric = Objects.requireNonNull(request.getMetric(), "request.metric");
-        String selector = PromQLBuilder.fromIntrinsicTags(metric.getIntrinsicTags());
+        Metric requestMetric = Objects.requireNonNull(request.getMetric(), "request.metric");
+        String selector = PromQLBuilder.fromIntrinsicTags(requestMetric.getIntrinsicTags());
         long startSec = request.getStart().getEpochSecond();
         long endSec   = request.getEnd().getEpochSecond();
         long stepSec  = stepSeconds(request);
@@ -112,8 +132,19 @@ public final class PrometheusReadClient {
                 + "&step=" + stepSec + "s";
 
         String body = executeGet(url);
-        List<DataPoint> points = PromResponseParser.parseRangeResponse(body);
-        return new ImmutableTimeSeriesData(metric, points);
+        // Reconstruct the Metric from the response's actual labels (where
+        // mtype lives), not from the request Metric (which OpenNMS builds
+        // with only resourceId+name — no mtype). When the matrix is empty,
+        // skip the synthesis fallback altogether: OpenNMS streams the
+        // empty datapoint list and never dereferences mtype on it, so a
+        // synthesis tick here would just inflate the counter for graphs
+        // that won't render anyway.
+        PromResponseParser.RangeResult result =
+                PromResponseParser.parseRangeResponseWithMetric(body, requestMetric);
+        Metric metric = result.points().isEmpty()
+                ? result.metric()
+                : mtypeFallback.apply(result.metric());
+        return new ImmutableTimeSeriesData(metric, result.points());
     }
 
     /**

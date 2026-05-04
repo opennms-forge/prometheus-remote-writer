@@ -22,6 +22,7 @@ and prints them through the Karaf shell command
 | `samples_dropped_nonfinite_total`          | Samples whose value was `NaN`, `+Inf`, or `-Inf`.
 | `samples_dropped_duplicate_total`          | Same-timestamp same-series dedup (last-write-wins).
 | `samples_unparseable_resource_id_total`    | Samples whose `resourceId` matched none of the parser grammars (rising rate ⇒ open an issue).
+| `samples_synthesized_mtype_total`          | Reads where the Prometheus response lacked an `mtype` label and the plugin synthesized `mtype="gauge"` to keep graphs renderable. Ticks once per Metric reconstruction — per matched series in `findMetrics`, once per fetch in `getTimeSeriesData`. See <<mtype-roundtrip>>. Should drop to flat once Prometheus retention has aged out pre-fix data, or rise indefinitely if `labels.exclude = mtype` is configured.
 |===
 
 === Pipeline state

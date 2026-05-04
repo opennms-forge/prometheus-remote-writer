@@ -338,7 +338,8 @@ class PrometheusRemoteWriterConfigTest {
             "foreign_source", "foreign_id", "node_label", "location",
             "resource_type", "resource_instance",
             "if_name", "if_descr", "if_speed",
-            "onms_instance_id"
+            "onms_instance_id",
+            "mtype"
         };
         for (String name : reserved) {
             PrometheusRemoteWriterConfig c = minimal();
