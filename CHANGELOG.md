@@ -7,6 +7,41 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Time-series graph rendering returned HTTP 500 against Prometheus stacks.**
+  OpenNMS Horizon's `NewtsConverterUtils.dataPointToRow` unconditionally
+  dereferences a `mtype` meta tag on every Metric returned by the read path;
+  the plugin was dropping that tag on write and could not reconstruct it on
+  read. The fix is two-sided:
+  - **Write side**: `mtype` is now a default Prometheus label, sourced from
+    the Sample's `MetaTagNames.mtype` meta tag (set by the OpenNMS writer
+    on every sample). Reserved against `labels.rename` collisions like the
+    rest of the default allowlist.
+  - **Read side**: when a Prometheus response lacks the `mtype` label
+    (typical of data already on disk from before this fix), the plugin
+    synthesizes `mtype="gauge"` on the reconstructed Metric so graphs
+    render. Counter metrics in legacy data render as cumulative values
+    rather than rates — visibly less informative but never wrong; new
+    writes preserve the original mtype, so post-fix counter rendering is
+    correct.
+
+### Added
+
+- **`samples_synthesized_mtype_total` plugin metric.** Counts every
+  read-time `mtype="gauge"` synthesis. The counter ticks once per Metric
+  reconstruction — per matched series in `findMetrics`, once per fetch in
+  `getTimeSeriesData` — not once per Sample. Operators watch this counter
+  to know when their Prometheus retention has aged out the pre-fix data;
+  once it stops rising, every rendered graph uses authentic mtype values
+  from the writer. (A second cause for a continuously-rising counter is
+  `labels.exclude = mtype` — see the `mtype` round-trip docs.) Visible
+  via `opennms:prometheus-writer-stats`.
+- **One-shot WARN per metric name** when synthesis fires, gated by an
+  insertion-ordered LRU bounded at 256 distinct names. Beyond the cap, the
+  counter still increments but no further WARNs fire for evicted names —
+  bounding log spam under pathological metric-name cardinality.
+
 ## [0.3.2] — 2026-04-27
 
 A maintenance release whose headline is **the project's new home**: the

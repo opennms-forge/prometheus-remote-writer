@@ -27,12 +27,55 @@ the corresponding source data is available:
 | `if_descr`             | external `ifDescr`                      |
 | `if_speed`             | derived                                 | Bits-per-second: `ifHighSpeed × 1_000_000` when non-zero, else `ifSpeed`.
 | `onms_cat_<name>`      | surveillance categories                 | One label per category, value `"true"`.
+| `mtype`                | meta tag `MetaTagNames.mtype`           | Metric type (`gauge`, `counter`, `count`, `rate`, `timestamp`). Set by the OpenNMS writer on every Sample. *Load-bearing for graph rendering* — see <<mtype-roundtrip>>.
 |===
 
 *Deliberately excluded by default* — available via `labels.include` if
 you want them: `if_alias` (user-editable, churns), `sys_descr`,
 `sys_object_id`, asset-record fields, OpenNMS metadata (see
 <<configuration>> for the metadata gating rules).
+
+[#mtype-roundtrip]
+=== `mtype` round-trip and the read-time fallback
+
+OpenNMS's read-side graph renderer (`NewtsConverterUtils.dataPointToRow`)
+unconditionally dereferences `MetaTagNames.mtype` on every Metric the
+plugin returns. A Metric reaching that code without an `mtype` meta tag
+trips a `NullPointerException` and the graph fetch returns HTTP 500.
+
+To keep the round-trip working, the plugin:
+
+* *Emits `mtype` as a default label on write* — sourced from the Sample's
+  `MetaTagNames.mtype` meta tag (the OpenNMS writer sets it on every
+  Sample). Reserved against `labels.rename` collisions like the rest of
+  the default allowlist.
+* *Synthesizes `mtype="gauge"` on read* when a Prometheus response for a
+  series lacks the label. This covers data already on disk from before
+  the fix landed. Counter metrics in legacy data render as cumulative
+  values rather than rates — visibly less informative but never wrong;
+  new writes preserve the original mtype, so post-fix counter rendering
+  is correct.
+
+Operators who explicitly exclude `mtype` via `labels.exclude = mtype` will
+break graph rendering for new writes — the synthesis fallback still
+recovers those reads, but counter graphs degrade to gauges. The exclude
+path is intended only for non-OpenNMS consumers of the same Prometheus
+stack.
+
+The `samples_synthesized_mtype_total` counter (visible via
+`opennms:prometheus-writer-stats`) tracks every fallback synthesis. The
+counter ticks once per Metric reconstruction — per matched series in
+`findMetrics`, once per fetch in `getTimeSeriesData` — not once per
+Sample. Watch it climb until Prometheus retention has aged out the
+pre-fix data, then drop to flat: at that point every rendered graph is
+using authentic mtype values from the writer.
+
+If the counter rises indefinitely instead of plateauing, the most likely
+cause is `labels.exclude = mtype` in your config — that's a supported
+operator override (intended for non-OpenNMS consumers of the same
+Prometheus stack), but it means the read path falls back to synthesis on
+every fetch indefinitely. Either remove the exclude rule or treat the
+rising counter as expected for your deployment.
 
 == Label enrichment is two-sided
 

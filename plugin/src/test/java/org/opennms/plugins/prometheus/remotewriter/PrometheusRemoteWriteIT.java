@@ -17,6 +17,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.opennms.integration.api.v1.timeseries.DataPoint;
+import org.opennms.integration.api.v1.timeseries.MetaTagNames;
 import org.opennms.integration.api.v1.timeseries.Metric;
 import org.opennms.integration.api.v1.timeseries.Sample;
 import org.opennms.integration.api.v1.timeseries.TagMatcher;
@@ -588,6 +589,162 @@ class PrometheusRemoteWriteIT {
                 assertThat(t.getKey()).isEqualTo("job");
                 assertThat(t.getValue()).isEqualTo("opennms-prod");
             });
+        } finally {
+            override.stop();
+        }
+    }
+
+    @Test
+    void mtype_meta_tag_round_trips_through_prometheus_without_synthesis() throws Exception {
+        // OpenNMS-core's NewtsConverterUtils.dataPointToRow dereferences
+        // MetaTagNames.mtype on every returned Metric. The plugin emits mtype
+        // as a default Prometheus label; reading the series back must
+        // surface it as a meta tag with the same value, and the read-side
+        // synthesis counter must NOT tick (the value came from Prometheus,
+        // not from a fallback).
+        Instant now = Instant.now();
+        String metricName = "onms_it_mtype_" + System.nanoTime();
+        Sample sample = ImmutableSample.builder()
+                .metric(ImmutableMetric.builder()
+                        .intrinsicTag("name", metricName)
+                        .intrinsicTag("resourceId", "node[1].interfaceSnmp[eth0]")
+                        .metaTag(MetaTagNames.mtype, "counter")
+                        .build())
+                .time(now)
+                .value(123.0)
+                .build();
+
+        long synthesizedBefore = storage.getMetrics().snapshot()
+                .get(PluginMetrics.SAMPLES_SYNTHESIZED_MTYPE).longValue();
+
+        storage.store(List.of(sample));
+        PluginMetrics m = storage.getMetrics();
+        await().atMost(Duration.ofSeconds(20))
+               .until(() -> m.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue() >= 1L);
+
+        TagMatcher nameMatcher = ImmutableTagMatcher.builder()
+                .type(TagMatcher.Type.EQUALS)
+                .key("name")
+                .value(metricName)
+                .build();
+
+        List<Metric> found = await().atMost(Duration.ofSeconds(20))
+                .until(() -> storage.findMetrics(List.of(nameMatcher)),
+                       list -> !list.isEmpty());
+        assertThat(found).hasSize(1);
+
+        // The mtype meta tag round-trips with the value we wrote.
+        assertThat(found.get(0).getFirstTagByKey(MetaTagNames.mtype).getValue())
+                .isEqualTo("counter");
+
+        // findMetrics drove a Metric reconstruction; since the response
+        // carried mtype, the fallback did NOT synthesize.
+        long synthesizedAfter = storage.getMetrics().snapshot()
+                .get(PluginMetrics.SAMPLES_SYNTHESIZED_MTYPE).longValue();
+        assertThat(synthesizedAfter).isEqualTo(synthesizedBefore);
+
+        // getTimeSeriesData reconstructs the Metric from the response too —
+        // mtype must survive that path as well.
+        TimeSeriesData data = storage.getTimeSeriesData(
+                ImmutableTimeSeriesFetchRequest.builder()
+                        .metric(found.get(0))
+                        .start(now.minusSeconds(60))
+                        .end(now.plusSeconds(60))
+                        .step(Duration.ofSeconds(1))
+                        .aggregation(org.opennms.integration.api.v1.timeseries.Aggregation.NONE)
+                        .build());
+        assertThat(data.getMetric().getFirstTagByKey(MetaTagNames.mtype).getValue())
+                .isEqualTo("counter");
+        // Still no synthesis.
+        assertThat(storage.getMetrics().snapshot()
+                .get(PluginMetrics.SAMPLES_SYNTHESIZED_MTYPE).longValue())
+                .isEqualTo(synthesizedBefore);
+    }
+
+    @Test
+    void legacy_data_without_mtype_label_synthesizes_gauge_on_read() throws Exception {
+        // Simulate pre-fix data already in Prometheus by configuring a
+        // labels.exclude that drops the mtype label on the way out. After
+        // the data lands, the read path encounters a series without mtype
+        // and synthesizes "gauge", incrementing the counter exactly once
+        // per Metric reconstruction (one for findMetrics, one for
+        // getTimeSeriesData).
+        storage.stop();
+        PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+        String base = "http://" + prometheus.getHost() + ":" + prometheus.getMappedPort(9090);
+        c.setWriteUrl(base + "/api/v1/write");
+        c.setReadUrl(base);
+        c.setLabelsExclude("mtype");
+        c.setBatchSize(10);
+        c.setFlushIntervalMs(100);
+        c.setRetryInitialBackoffMs(100);
+        c.setRetryMaxBackoffMs(500);
+        c.setRetryMaxAttempts(10);
+        c.setShutdownGracePeriodMs(2_000);
+        PrometheusRemoteWriterStorage override = new PrometheusRemoteWriterStorage(c);
+        override.start();
+        try {
+            Instant now = Instant.now();
+            String metricName = "onms_it_legacy_" + System.nanoTime();
+            override.store(List.of(ImmutableSample.builder()
+                    .metric(ImmutableMetric.builder()
+                            .intrinsicTag("name", metricName)
+                            .intrinsicTag("resourceId", "node[1].nodeSnmp[]")
+                            .metaTag(MetaTagNames.mtype, "counter")
+                            .build())
+                    .time(now)
+                    .value(99.0)
+                    .build()));
+
+            PluginMetrics m = override.getMetrics();
+            await().atMost(Duration.ofSeconds(20))
+                   .until(() -> m.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue() >= 1L);
+
+            TagMatcher nameMatcher = ImmutableTagMatcher.builder()
+                    .type(TagMatcher.Type.EQUALS)
+                    .key("name")
+                    .value(metricName)
+                    .build();
+
+            // Pin per-call-path counter increments separately so a regression
+            // that collapses synthesis on one path while keeping it on the
+            // other can't pass silently.
+            long beforeFind = m.snapshot()
+                    .get(PluginMetrics.SAMPLES_SYNTHESIZED_MTYPE).longValue();
+
+            List<Metric> found = await().atMost(Duration.ofSeconds(20))
+                    .until(() -> override.findMetrics(List.of(nameMatcher)),
+                           list -> !list.isEmpty());
+            assertThat(found).hasSize(1);
+
+            // mtype was excluded on write → synthesized as "gauge" on read.
+            assertThat(found.get(0).getFirstTagByKey(MetaTagNames.mtype).getValue())
+                    .isEqualTo("gauge");
+            long afterFind = m.snapshot()
+                    .get(PluginMetrics.SAMPLES_SYNTHESIZED_MTYPE).longValue();
+            // findMetrics reconstructs one Metric per matched series; we
+            // wrote exactly one series, so the counter ticks by exactly 1.
+            assertThat(afterFind - beforeFind).isEqualTo(1L);
+
+            // getTimeSeriesData also reconstructs from the response and
+            // synthesizes when the response lacks mtype.
+            TimeSeriesData data = override.getTimeSeriesData(
+                    ImmutableTimeSeriesFetchRequest.builder()
+                            .metric(found.get(0))
+                            .start(now.minusSeconds(60))
+                            .end(now.plusSeconds(60))
+                            .step(Duration.ofSeconds(1))
+                            .aggregation(
+                                    org.opennms.integration.api.v1.timeseries.Aggregation.NONE)
+                            .build());
+            assertThat(data.getMetric().getFirstTagByKey(MetaTagNames.mtype).getValue())
+                    .isEqualTo("gauge");
+            assertThat(data.getDataPoints()).isNotEmpty();
+            long afterFetch = m.snapshot()
+                    .get(PluginMetrics.SAMPLES_SYNTHESIZED_MTYPE).longValue();
+            // getTimeSeriesData synthesizes once per fetch (the matrix had
+            // datapoints, so the early-return-when-empty branch is bypassed).
+            assertThat(afterFetch - afterFind).isEqualTo(1L);
         } finally {
             override.stop();
         }

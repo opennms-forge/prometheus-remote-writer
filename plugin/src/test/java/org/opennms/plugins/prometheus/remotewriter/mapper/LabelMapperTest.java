@@ -16,11 +16,13 @@ import java.util.Map;
 
 import org.junit.jupiter.api.Test;
 import org.opennms.integration.api.v1.timeseries.IntrinsicTagNames;
+import org.opennms.integration.api.v1.timeseries.MetaTagNames;
 import org.opennms.integration.api.v1.timeseries.Sample;
 import org.opennms.integration.api.v1.timeseries.immutables.ImmutableMetric;
 import org.opennms.integration.api.v1.timeseries.immutables.ImmutableSample;
 import org.opennms.plugins.prometheus.remotewriter.config.PrometheusRemoteWriterConfig;
 import org.opennms.plugins.prometheus.remotewriter.metrics.PluginMetrics;
+import org.opennms.plugins.prometheus.remotewriter.sanitize.Sanitizer;
 import org.opennms.plugins.prometheus.remotewriter.wire.MappedSample;
 
 class LabelMapperTest {
@@ -104,6 +106,71 @@ class LabelMapperTest {
         // ifHighSpeed=1000 megabits = 1e9 bits/s
         MappedSample out = DEFAULT_MAPPER.map(interfaceSample());
         assertThat(out.labels()).containsEntry("if_speed", "1000000000");
+    }
+
+    @Test
+    void mtype_meta_tag_emits_mtype_label() {
+        // mtype is load-bearing for OpenNMS late-aggregation. The OpenNMS
+        // writer always sets MetaTagNames.mtype on every Sample handed to
+        // store(); here we verify the value rides through to a Prometheus
+        // label of the same name.
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "ifHCInOctets")
+                .intrinsicTag("resourceId", "node[1].interfaceSnmp[eth0]")
+                .metaTag(MetaTagNames.mtype, "counter"));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels()).containsEntry("mtype", "counter");
+    }
+
+    @Test
+    void mtype_label_absent_when_source_meta_tag_missing() {
+        // Non-OpenNMS test fixtures (and v0.3.x writes) have no mtype; the
+        // mapper does not synthesize on the write side. The read-side
+        // MtypeFallback covers the read direction.
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "x")
+                .intrinsicTag("resourceId", "node[1].nodeSnmp[]"));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels()).doesNotContainKey("mtype");
+    }
+
+    @Test
+    void mtype_marked_consumed_so_labels_include_star_does_not_double_emit() {
+        // labels.include = * walks every source-tag and emits any not already
+        // consumed by the default allowlist. mtype is in the consumed set, so
+        // it must appear exactly once with value "gauge" — not also under a
+        // snake-cased alias that duplicates the entry.
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setLabelsInclude("*");
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "x")
+                .intrinsicTag("resourceId", "node[1].nodeSnmp[]")
+                .metaTag(MetaTagNames.mtype, "gauge"));
+        MappedSample out = new LabelMapper(c).map(s);
+        assertThat(out.labels()).containsEntry("mtype", "gauge");
+        long mtypeEntries = out.labels().keySet().stream()
+                .filter(k -> k.equals("mtype"))
+                .count();
+        assertThat(mtypeEntries).isEqualTo(1);
+    }
+
+    @Test
+    void mtype_label_value_passes_through_sanitizer_byte_cap() {
+        // Pin the sanitizer call path by feeding an over-long value and
+        // asserting it's truncated to the label-value byte cap. The Mtype
+        // enum names (gauge, counter, count, rate, timestamp) all fit
+        // trivially, but if a future refactor bypasses Sanitizer.labelValue
+        // for the mtype emission, an over-long value would slip through to
+        // the wire and Prometheus would reject the whole batch. Sanitizer
+        // semantics: truncate at MAX_LABEL_VALUE_BYTES (codepoint-safe).
+        String oversized = "a".repeat(Sanitizer.MAX_LABEL_VALUE_BYTES + 100);
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "x")
+                .metaTag(MetaTagNames.mtype, oversized));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        String emitted = out.labels().get("mtype");
+        assertThat(emitted.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                .hasSizeLessThanOrEqualTo(Sanitizer.MAX_LABEL_VALUE_BYTES);
     }
 
     @Test
@@ -982,7 +1049,8 @@ class LabelMapperTest {
                 "ifHighSpeed",
                 "ifSpeed",
                 "nodeId",
-                "categories");
+                "categories",
+                MetaTagNames.mtype);
     }
 
     // ---------- fixtures ----------------------------------------------------
