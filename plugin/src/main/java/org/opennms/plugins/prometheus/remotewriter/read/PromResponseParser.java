@@ -68,6 +68,28 @@ public final class PromResponseParser {
     }
 
     /**
+     * Result of {@link #parseRangeResponseWithMetric}: the merged datapoints
+     * plus a Metric reconstructed from the first matched series' labels (or
+     * the supplied fallback Metric when the matrix is empty).
+     *
+     * <p>The Metric is the load-bearing reason this method exists — OpenNMS-
+     * core's {@code NewtsConverterUtils.dataPointToRow} dereferences
+     * {@code MetaTagNames.mtype} on the returned Metric, so we must surface
+     * the actual Prometheus-stored mtype label rather than echoing the
+     * inbound request Metric (which OpenNMS constructs with only
+     * {@code resourceId} and {@code name} — no mtype).
+     *
+     * <p>{@code points} is wrapped in {@link List#copyOf} at construction to
+     * make the result effectively immutable — callers can't mutate the
+     * merged datapoint list and accidentally corrupt what we hand to OpenNMS.
+     */
+    public record RangeResult(Metric metric, List<DataPoint> points) {
+        public RangeResult {
+            points = List.copyOf(points);
+        }
+    }
+
+    /**
      * Parse a {@code /api/v1/query_range} matrix response into a list of
      * DataPoints. When the response contains multiple series (selector was not
      * unique), points from all series are merged in order, with duplicates
@@ -76,6 +98,10 @@ public final class PromResponseParser {
      * as the literal strings {@code "NaN"}, {@code "+Inf"}, {@code "-Inf"},
      * which this method translates to {@link Double#NaN} /
      * {@link Double#POSITIVE_INFINITY} / {@link Double#NEGATIVE_INFINITY}.
+     *
+     * <p>Prefer {@link #parseRangeResponseWithMetric} for production code —
+     * it surfaces the response's actual labels (which carry {@code mtype})
+     * rather than discarding them.
      */
     public static List<DataPoint> parseRangeResponse(String json) throws StorageException {
         try {
@@ -107,6 +133,63 @@ public final class PromResponseParser {
                 out.add(new ImmutableDataPoint(Instant.ofEpochMilli(e.getKey()), e.getValue()));
             }
             return out;
+        } catch (JSONException | IllegalStateException | NumberFormatException e) {
+            throw new StorageException(
+                "failed to parse Prometheus /query_range response: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Parse a {@code /api/v1/query_range} matrix response into a Metric +
+     * merged DataPoints. The Metric is reconstructed from the first matched
+     * series' labels via {@link #labelObjectToMetric}; when the matrix is
+     * empty the supplied {@code fallbackMetric} is returned unchanged.
+     *
+     * <p>DataPoint merge semantics match {@link #parseRangeResponse}: across
+     * multiple series, points are merged with last-write-wins on duplicate
+     * timestamps. In practice every series matched by a single OpenNMS
+     * resource+attribute query carries the same {@code mtype} on the write
+     * side, so taking the first series' labels for the Metric is correct.
+     */
+    public static RangeResult parseRangeResponseWithMetric(String json, Metric fallbackMetric)
+            throws StorageException {
+        try {
+            JSONObject root = parseJson(json);
+            requireSuccess(root);
+            JSONObject data = root.optJSONObject("data");
+            if (data == null) return new RangeResult(fallbackMetric, List.of());
+            JSONArray results = data.optJSONArray("result");
+            if (results == null || results.isEmpty()) {
+                return new RangeResult(fallbackMetric, List.of());
+            }
+
+            // Reconstruct the Metric from the first series' labels. Empty
+            // label objects (synthetic ranges that Prometheus serializes
+            // with `"metric": {}`) fall back to the request Metric — there's
+            // nothing to reconstruct from.
+            JSONObject firstLabels = results.getJSONObject(0).optJSONObject("metric");
+            Metric metric = (firstLabels != null && !firstLabels.isEmpty())
+                    ? labelObjectToMetric(firstLabels)
+                    : fallbackMetric;
+
+            java.util.TreeMap<Long, Double> byTimestamp = new java.util.TreeMap<>();
+            for (int r = 0; r < results.length(); r++) {
+                JSONArray values = results.getJSONObject(r).optJSONArray("values");
+                if (values == null) continue;
+                for (int i = 0; i < values.length(); i++) {
+                    JSONArray pair = values.getJSONArray(i);
+                    double unixTs = pair.getDouble(0);
+                    double value  = parsePromValue(pair.getString(1));
+                    long millis   = Math.round(unixTs * 1_000.0);
+                    byTimestamp.put(millis, value);
+                }
+            }
+
+            List<DataPoint> points = new ArrayList<>(byTimestamp.size());
+            for (java.util.Map.Entry<Long, Double> e : byTimestamp.entrySet()) {
+                points.add(new ImmutableDataPoint(Instant.ofEpochMilli(e.getKey()), e.getValue()));
+            }
+            return new RangeResult(metric, points);
         } catch (JSONException | IllegalStateException | NumberFormatException e) {
             throw new StorageException(
                 "failed to parse Prometheus /query_range response: " + e.getMessage(), e);

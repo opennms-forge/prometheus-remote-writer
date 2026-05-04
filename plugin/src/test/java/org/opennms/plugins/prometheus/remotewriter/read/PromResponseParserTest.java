@@ -14,8 +14,10 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.opennms.integration.api.v1.timeseries.DataPoint;
 import org.opennms.integration.api.v1.timeseries.IntrinsicTagNames;
+import org.opennms.integration.api.v1.timeseries.MetaTagNames;
 import org.opennms.integration.api.v1.timeseries.Metric;
 import org.opennms.integration.api.v1.timeseries.StorageException;
+import org.opennms.integration.api.v1.timeseries.immutables.ImmutableMetric;
 
 class PromResponseParserTest {
 
@@ -172,6 +174,117 @@ class PromResponseParserTest {
             ]}}""";
         assertThatThrownBy(() -> PromResponseParser.parseRangeResponse(json))
                 .isInstanceOf(StorageException.class);
+    }
+
+    @Test
+    void mtype_label_round_trips_into_meta_tags() throws Exception {
+        // The catch-all branch in labelObjectToMetric routes any non-name,
+        // non-resourceId label into a meta tag. mtype is the load-bearing
+        // example: OpenNMS-core dereferences MetaTagNames.mtype on every
+        // returned Metric, so this round-trip must work without special-casing.
+        String json = """
+            {
+              "status": "success",
+              "data": [
+                {
+                  "__name__": "ifHCInOctets",
+                  "resourceId": "node[1].interfaceSnmp[eth0]",
+                  "mtype": "counter"
+                }
+              ]
+            }""";
+        List<Metric> out = PromResponseParser.parseSeriesResponse(json);
+        assertThat(out).hasSize(1);
+        Metric m = out.get(0);
+        assertThat(m.getFirstTagByKey(MetaTagNames.mtype).getValue()).isEqualTo("counter");
+        assertThat(m.getMetaTags()).extracting("key").containsOnly("mtype");
+    }
+
+    // ---------- /query_range with Metric reconstruction ---------------------
+
+    @Test
+    void range_with_metric_reconstructs_first_series_labels() throws Exception {
+        String json = """
+            {
+              "status": "success",
+              "data": {
+                "resultType": "matrix",
+                "result": [
+                  {
+                    "metric": {
+                      "__name__": "ifHCInOctets",
+                      "resourceId": "node[1].interfaceSnmp[eth0]",
+                      "mtype": "counter"
+                    },
+                    "values": [[1700000000,"1.0"],[1700000060,"2.0"]]
+                  }
+                ]
+              }
+            }""";
+        Metric fallback = ImmutableMetric.builder()
+                .intrinsicTag(IntrinsicTagNames.name, "ignored")
+                .build();
+        PromResponseParser.RangeResult r =
+                PromResponseParser.parseRangeResponseWithMetric(json, fallback);
+
+        assertThat(r.points()).hasSize(2);
+        assertThat(r.metric().getFirstTagByKey(IntrinsicTagNames.name).getValue())
+                .isEqualTo("ifHCInOctets");
+        assertThat(r.metric().getFirstTagByKey(MetaTagNames.mtype).getValue())
+                .isEqualTo("counter");
+    }
+
+    @Test
+    void range_with_metric_falls_back_when_matrix_is_empty() throws Exception {
+        String json = """
+            {"status":"success","data":{"resultType":"matrix","result":[]}}""";
+        Metric fallback = ImmutableMetric.builder()
+                .intrinsicTag(IntrinsicTagNames.name, "fallback-name")
+                .build();
+        PromResponseParser.RangeResult r =
+                PromResponseParser.parseRangeResponseWithMetric(json, fallback);
+
+        assertThat(r.points()).isEmpty();
+        assertThat(r.metric()).isSameAs(fallback);
+    }
+
+    @Test
+    void range_with_metric_falls_back_when_first_series_has_empty_metric_object() throws Exception {
+        // Synthetic ranges (recording rules, etc.) sometimes serialize with
+        // `"metric": {}`. Nothing to reconstruct from — use the fallback.
+        String json = """
+            {"status":"success","data":{"resultType":"matrix","result":[
+              {"metric":{},"values":[[1700000000,"1.0"]]}
+            ]}}""";
+        Metric fallback = ImmutableMetric.builder()
+                .intrinsicTag(IntrinsicTagNames.name, "fallback-name")
+                .build();
+        PromResponseParser.RangeResult r =
+                PromResponseParser.parseRangeResponseWithMetric(json, fallback);
+
+        assertThat(r.points()).hasSize(1);
+        assertThat(r.metric()).isSameAs(fallback);
+    }
+
+    @Test
+    void range_with_metric_uses_first_series_when_multiple_series_match() throws Exception {
+        // Two series share the same selector — the first series' labels are
+        // used for the Metric (in practice every matched series has the same
+        // mtype, so this is correct).
+        String json = """
+            {"status":"success","data":{"resultType":"matrix","result":[
+              {"metric":{"__name__":"x","a":"1","mtype":"gauge"},"values":[[1700000000,"1.0"]]},
+              {"metric":{"__name__":"x","a":"2","mtype":"gauge"},"values":[[1700000030,"1.5"]]}
+            ]}}""";
+        Metric fallback = ImmutableMetric.builder()
+                .intrinsicTag(IntrinsicTagNames.name, "ignored")
+                .build();
+        PromResponseParser.RangeResult r =
+                PromResponseParser.parseRangeResponseWithMetric(json, fallback);
+
+        assertThat(r.points()).hasSize(2);
+        assertThat(r.metric().getMetaTags()).extracting("key").contains("a", "mtype");
+        assertThat(r.metric().getFirstTagByKey("a").getValue()).isEqualTo("1");
     }
 
     @Test

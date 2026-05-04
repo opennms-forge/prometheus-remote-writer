@@ -186,7 +186,7 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
             lm = new LabelMapper(config, m);
             q  = new SampleQueue(config.getQueueCapacity());
             wc = new RemoteWriteHttpClient(config);
-            rc = new PrometheusReadClient(config);
+            rc = new PrometheusReadClient(config, m);
             f  = new Flusher(q, wc, config.getBatchSize(), config.getFlushIntervalMs(), m,
                     org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilders
                             .forVersion(config.getWireProtocolVersion()));
@@ -238,7 +238,7 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
                     effectiveMaxPayload());
 
             wc = new RemoteWriteHttpClient(config);
-            rc = new PrometheusReadClient(config);
+            rc = new PrometheusReadClient(config, m);
             wf = new WalFlusher(walDir, ww, recovered.checkpoint(), effectiveMaxPayload(),
                     wc, config.getBatchSize(), config.getFlushIntervalMs(), m,
                     org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilders

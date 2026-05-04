@@ -30,6 +30,7 @@ public final class PluginMetrics {
     public static final String SAMPLES_DROPPED_NONFINITE       = "samples_dropped_nonfinite_total";
     public static final String SAMPLES_DROPPED_DUPLICATE       = "samples_dropped_duplicate_total";
     public static final String SAMPLES_UNPARSEABLE_RESOURCE_ID = "samples_unparseable_resource_id_total";
+    public static final String SAMPLES_SYNTHESIZED_MTYPE       = "samples_synthesized_mtype_total";
     public static final String DELETE_NOOP                     = "delete_noop_total";
     public static final String METADATA_DENYLIST_BLOCKED       = "metadata_denylist_blocked_total";
     public static final String QUEUE_DEPTH                     = "queue_depth";
@@ -56,6 +57,7 @@ public final class PluginMetrics {
     private final Counter samplesDroppedNonfinite;
     private final Counter samplesDroppedDuplicate;
     private final Counter samplesUnparseableResourceId;
+    private final Counter samplesSynthesizedMtype;
 
     private final Counter walBytesWritten;
     private final Counter walBytesCheckpointed;
@@ -72,6 +74,7 @@ public final class PluginMetrics {
         this.samplesDroppedNonfinite      = registry.counter(SAMPLES_DROPPED_NONFINITE);
         this.samplesDroppedDuplicate      = registry.counter(SAMPLES_DROPPED_DUPLICATE);
         this.samplesUnparseableResourceId = registry.counter(SAMPLES_UNPARSEABLE_RESOURCE_ID);
+        this.samplesSynthesizedMtype      = registry.counter(SAMPLES_SYNTHESIZED_MTYPE);
         this.walBytesWritten              = registry.counter(WAL_BYTES_WRITTEN);
         this.walBytesCheckpointed         = registry.counter(WAL_BYTES_CHECKPOINTED);
         this.walReplaySamples             = registry.counter(WAL_REPLAY_SAMPLES);
@@ -91,6 +94,7 @@ public final class PluginMetrics {
     public void samplesDroppedNonfinite(long n)        { if (n > 0) samplesDroppedNonfinite.inc(n); }
     public void samplesDroppedDuplicate(long n)        { if (n > 0) samplesDroppedDuplicate.inc(n); }
     public void samplesUnparseableResourceId(long n)   { if (n > 0) samplesUnparseableResourceId.inc(n); }
+    public void samplesSynthesizedMtype(long n)        { if (n > 0) samplesSynthesizedMtype.inc(n); }
 
     public void walBytesWritten(long n)                { if (n > 0) walBytesWritten.inc(n); }
     public void walBytesCheckpointed(long n)           { if (n > 0) walBytesCheckpointed.inc(n); }
