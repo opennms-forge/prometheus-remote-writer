@@ -7,6 +7,22 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.3] — 2026-05-05
+
+A patch release whose only purpose is to ship the **graph-rendering fix**:
+every time-series graph fetch in OpenNMS Horizon 35 returned HTTP 500
+against a Prometheus stack served by this plugin, because OpenNMS-core
+unconditionally dereferences an `mtype` meta tag the plugin was
+dropping on write and could not reconstruct on read. v0.3.3 restores
+the round-trip and adds a defensive read-side fallback for data already
+on disk from before the fix.
+
+**No other behaviour change** from v0.3.2 — same wire format, same
+configuration surface, same KAR contents (modulo the bug fix). Existing
+v0.3.2 deployments hitting the graph-render NPE should upgrade
+immediately; deployments not yet using time-series graphs against this
+plugin can defer to the next minor release.
+
 ### Fixed
 
 - **Time-series graph rendering returned HTTP 500 against Prometheus stacks.**
