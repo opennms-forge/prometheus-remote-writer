@@ -7,40 +7,86 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.3] — 2026-05-05
+
+A patch release whose headline is the **graph-rendering hotfix**: every
+time-series graph fetch in OpenNMS Horizon 35 returned HTTP 500 against
+a Prometheus stack served by v0.3.2, because OpenNMS-core
+unconditionally dereferences an `mtype` meta tag the plugin was dropping
+on write and could not reconstruct on read. v0.3.3 restores the
+round-trip and adds a defensive read-side fallback for data already on
+disk from before the upgrade.
+
+**Upgrade if you use time-series graphs.** Every v0.3.2 deployment that
+renders graphs through this plugin's read path is hitting the NPE and
+serving 500s on `/measurements`. The fix is automatic on bundle
+activation — no `.cfg` changes, no migration, no operator action beyond
+installing the new KAR. Deployments that don't yet render graphs can
+safely defer to the next minor release.
+
+**No other behaviour change** from v0.3.2 — same Remote Write v1 wire
+format, same authentication surface, same WAL semantics, same KAR
+contents (modulo the bug fix). One additional Prometheus label per
+series (`mtype`); cardinality is unchanged because the value is
+constant per series.
+
 ### Fixed
 
-- **Time-series graph rendering returned HTTP 500 against Prometheus stacks.**
-  OpenNMS Horizon's `NewtsConverterUtils.dataPointToRow` unconditionally
-  dereferences a `mtype` meta tag on every Metric returned by the read path;
-  the plugin was dropping that tag on write and could not reconstruct it on
-  read. The fix is two-sided:
-  - **Write side**: `mtype` is now a default Prometheus label, sourced from
-    the Sample's `MetaTagNames.mtype` meta tag (set by the OpenNMS writer
-    on every sample). Reserved against `labels.rename` collisions like the
-    rest of the default allowlist.
-  - **Read side**: when a Prometheus response lacks the `mtype` label
-    (typical of data already on disk from before this fix), the plugin
-    synthesizes `mtype="gauge"` on the reconstructed Metric so graphs
-    render. Counter metrics in legacy data render as cumulative values
-    rather than rates — visibly less informative but never wrong; new
-    writes preserve the original mtype, so post-fix counter rendering is
-    correct.
+- **Time-series graph rendering returned HTTP 500.** OpenNMS Horizon's
+  `NewtsConverterUtils.dataPointToRow` unconditionally dereferences
+  `MetaTagNames.mtype` on every `Metric` the plugin returns from
+  `findMetrics` and `getTimeSeriesData`; v0.3.2 dropped the tag on
+  write and could not reconstruct it on read. The web-tier surfaced
+  the error as `NullPointerException: Cannot invoke
+  "org.opennms.integration.api.v1.timeseries.Tag.getValue()" because
+  the return value of "Metric.getFirstTagByKey(String)" is null` in
+  `web.log`, with HTTP 500 returned to Grafana / the OpenNMS UI.
+  The fix is two-sided:
+  - **Write side** — `mtype` is now a default Prometheus label,
+    sourced from each `Sample`'s `MetaTagNames.mtype` meta tag (set
+    by the OpenNMS writer on every sample). Reserved against
+    `labels.rename` collisions like the rest of the default
+    allowlist; `labels.exclude = mtype` is honored but breaks graph
+    rendering for new writes (the read-side fallback below recovers
+    the data, with counter graphs degrading to gauges — supported
+    only for non-OpenNMS consumers of the same Prometheus stack).
+  - **Read side** — when a Prometheus response lacks the `mtype`
+    label (typical of data already on disk from before this fix),
+    the plugin synthesizes `mtype="gauge"` on the reconstructed
+    Metric so OpenNMS's late-aggregation can complete. Counter
+    metrics in legacy data render as cumulative values rather than
+    rates — visibly less informative but never wrong; new writes
+    preserve the original mtype, so post-upgrade counter rendering
+    is correct.
 
 ### Added
 
-- **`samples_synthesized_mtype_total` plugin metric.** Counts every
-  read-time `mtype="gauge"` synthesis. The counter ticks once per Metric
-  reconstruction — per matched series in `findMetrics`, once per fetch in
-  `getTimeSeriesData` — not once per Sample. Operators watch this counter
-  to know when their Prometheus retention has aged out the pre-fix data;
-  once it stops rising, every rendered graph uses authentic mtype values
-  from the writer. (A second cause for a continuously-rising counter is
-  `labels.exclude = mtype` — see the `mtype` round-trip docs.) Visible
-  via `opennms:prometheus-writer-stats`.
-- **One-shot WARN per metric name** when synthesis fires, gated by an
-  insertion-ordered LRU bounded at 256 distinct names. Beyond the cap, the
-  counter still increments but no further WARNs fire for evicted names —
-  bounding log spam under pathological metric-name cardinality.
+- **`samples_synthesized_mtype_total`** plugin metric. Counts every
+  read-time `mtype="gauge"` synthesis (one tick per `Metric`
+  reconstruction — per matched series in `findMetrics`, once per
+  fetch in `getTimeSeriesData`). The expected operator signal:
+  the counter rises while Prometheus retention still holds pre-fix
+  data, then drops to flat once the retention window has cycled
+  past. A counter that rises indefinitely instead of plateauing
+  almost always means `labels.exclude = mtype` is configured.
+  Visible via `opennms:prometheus-writer-stats` alongside the
+  existing `samples_*_total` family.
+- **One-shot WARN per metric name** when synthesis fires, scoped
+  to one bundle activation, gated by an insertion-ordered LRU
+  bounded at 256 distinct names. Beyond the cap, the counter
+  continues to increment but no further WARNs fire for evicted
+  names — bounding log spam under pathological metric-name
+  cardinality without losing the observability signal.
+
+### Verifying this release
+
+This release is GPG-signed by the project key (`0x1FC793D7F2E3FDDD`,
+fingerprint `53BC D4E3 C0CC 9ACF 40F4  6669 1FC7 93D7 F2E3 FDDD`).
+The KAR, the SHA-512 checksum, and the SBOM each ship with a
+detached `.asc` signature. See
+[`RELEASING.md` § Verifying a release](https://github.com/opennms-forge/prometheus-remote-writer/blob/main/RELEASING.md#verifying-a-release)
+for the full verification recipe and the canonical-fingerprint
+cross-check.
 
 ## [0.3.2] — 2026-04-27
 
